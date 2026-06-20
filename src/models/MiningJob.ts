@@ -1,4 +1,3 @@
-import { AddressType, getAddressInfo } from 'bitcoin-address-validation';
 import * as bitcoinjs from 'bitcoinjs-lib';
 
 import { IJobTemplate } from '../services/stratum-v1-jobs.service';
@@ -40,44 +39,58 @@ export class MiningJob {
 
         this.coinbaseTransaction = this.createCoinbaseTransaction(payoutInformation, jobTemplate.blockData.coinbasevalue);
 
-        //The commitment is recorded in a scriptPubKey of the coinbase transaction. It must be at least 38 bytes, with the first 6-byte of 0x6a24aa21a9ed, that is:
-        //     1-byte - OP_RETURN (0x6a)
-        //     1-byte - Push the following 36 bytes (0x24)
-        //     4-byte - Commitment header (0xaa21a9ed)
-        const segwitMagicBits = Buffer.from('aa21a9ed', 'hex');
-        //    32-byte - Commitment hash: Double-SHA256(witness root hash|witness reserved value)
+        // Build the scriptSig prefix (BIP34 height push). For Elektron Net, the node may supply
+        // `coinbase_script_sig_prefix` verbatim — if present, use it instead of self-encoding.
+        // Layout: <prefix bytes> <pool identifier> <padding for extranonce>
+        let blockHeightPrefix: Buffer;
+        if (jobTemplate.coinbase_script_sig_prefix && jobTemplate.coinbase_script_sig_prefix.length > 0) {
+            blockHeightPrefix = jobTemplate.coinbase_script_sig_prefix;
+        } else {
+            // Encode the block height (BIP34)
+            const blockHeightEncoded = bitcoinjs.script.number.encode(jobTemplate.blockData.height);
+            const blockHeightLengthByte = Buffer.from([blockHeightEncoded.length]);
+            blockHeightPrefix = Buffer.concat([blockHeightLengthByte, blockHeightEncoded]);
+        }
 
-        //    39th byte onwards: Optional data with no consensus meaning
-        // Initial pool identifier
-        let poolIdentifier = configService.get('POOL_IDENTIFIER') || 'Public-Pool';
-        let extra = Buffer.from(poolIdentifier);
+        const poolIdentifier = configService.get('POOL_IDENTIFIER') || 'Public-Pool';
+        const extra = Buffer.from(poolIdentifier);
 
-        // Encode the block height
-        // https://github.com/bitcoin/bips/blob/master/bip-0034.mediawiki
-        const blockHeightEncoded = bitcoinjs.script.number.encode(jobTemplate.blockData.height);
+        // Padding so the extranonce region always lands at a known offset.
+        // Original formula: EXTRANONCE + (3 - encoded_height_length); since
+        // blockHeightPrefix = length_byte + encoded_height_bytes, prefix.length = 1 + encoded_length.
+        // → padding = EXTRANONCE + 4 - prefix.length, clamped to 0.
+        const paddingSize = Math.max(0, TOTAL_EXTRANONCE_SIZE_BYTES + 4 - blockHeightPrefix.length);
+        const padding = Buffer.alloc(paddingSize, 0);
 
-        // Get the length of the block height encoding
-        const blockHeightLengthByte = Buffer.from([blockHeightEncoded.length]);
-
-        // Generate padding and take length of encode blockHeight into account
-        const padding = Buffer.alloc(TOTAL_EXTRANONCE_SIZE_BYTES + (3 - blockHeightEncoded.length), 0)
-
-        // Build the script
-        let script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, extra, padding]);
-        // Check if the pool identifier is too long
+        let script = Buffer.concat([blockHeightPrefix, extra, padding]);
         if (script.length > MAX_SCRIPT_SIZE) {
             console.warn('Pool identifier is too long, removing the pool identifier');
-            script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, padding]);
+            script = Buffer.concat([blockHeightPrefix, padding]);
         }
 
         this.coinbaseTransaction.ins[0].script = script;
-        this.coinbaseTransaction.addOutput(bitcoinjs.script.compile([bitcoinjs.opcodes.OP_RETURN, Buffer.concat([segwitMagicBits, jobTemplate.block.witnessCommit])]), 0);
 
-        // Check if the pool identifier is too long
+        // Elektron Net: append all `coinbase_required_outputs` from GBT verbatim, in order.
+        //   [0] = UTXO attestation (OP_RETURN <height> <32-byte UTXO hash>)
+        //   [1] = witness commitment (OP_RETURN 0x24 0xaa21a9ed <32-byte commitment>)
+        // Fallback for legacy/Bitcoin templates that did not provide required outputs:
+        // build the witness commitment from block.witnessCommit (Bitcoin-compatible path).
+        const requiredOutputs = jobTemplate.coinbase_required_outputs ?? [];
+        if (requiredOutputs.length > 0) {
+            for (const out of requiredOutputs) {
+                this.coinbaseTransaction.addOutput(out.scriptPubKey, out.value);
+            }
+        } else if (jobTemplate.block.witnessCommit) {
+            const segwitMagicBits = Buffer.from('aa21a9ed', 'hex');
+            this.coinbaseTransaction.addOutput(
+                bitcoinjs.script.compile([bitcoinjs.opcodes.OP_RETURN, Buffer.concat([segwitMagicBits, jobTemplate.block.witnessCommit])]),
+                0,
+            );
+        }
+
         if ((this.coinbaseTransaction.weight() + jobTemplate.block.weight()) > MAX_BLOCK_WEIGHT) {
             console.warn('Block weight exceeds the maximum allowed weight, removing the pool identifier');
-            let script = Buffer.concat([blockHeightLengthByte, blockHeightEncoded, padding]);
-            this.coinbaseTransaction.ins[0].script = script;
+            this.coinbaseTransaction.ins[0].script = Buffer.concat([blockHeightPrefix, padding]);
         }
 
         // get the non-witness coinbase tx
@@ -203,26 +216,14 @@ export class MiningJob {
     }
 
     private getPaymentScript(address: string): Buffer {
-        const addressInfo = getAddressInfo(address);
-        switch (addressInfo.type) {
-            case AddressType.p2wpkh: {
-                return bitcoinjs.payments.p2wpkh({ address, network: this.network }).output;
-            }
-            case AddressType.p2pkh: {
-                return bitcoinjs.payments.p2pkh({ address, network: this.network }).output;
-            }
-            case AddressType.p2sh: {
-                return bitcoinjs.payments.p2sh({ address, network: this.network }).output;
-            }
-            case AddressType.p2tr: {
-                return bitcoinjs.payments.p2tr({ address, network: this.network }).output;
-            }
-            case AddressType.p2wsh: {
-                return bitcoinjs.payments.p2wsh({ address, network: this.network }).output;
-            }
-            default: {
-                return Buffer.alloc(0);
-            }
+        // bitcoinjs.address.toOutputScript handles P2PKH, P2SH, P2WPKH, P2WSH and P2TR.
+        // It uses the bech32 HRP from `this.network`, so Elektron `be1q…` addresses are
+        // accepted automatically when the elektronMainnet Network object is supplied.
+        try {
+            return bitcoinjs.address.toOutputScript(address, this.network);
+        } catch (e) {
+            console.warn(`Invalid payout address ${address}: ${e.message ?? e}`);
+            return Buffer.alloc(0);
         }
     }
 

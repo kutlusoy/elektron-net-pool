@@ -28,6 +28,7 @@ import { EXTRANONCE1_SIZE_BYTES } from './stratum.constants';
 import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
+import { elektronMainnet, elektronRegtest } from '../utils/elektron-network';
 
 const TRUE_DIFF_ONE = 2.695953529101131e67;
 const BLOCKED_USER_AGENT_LOG_INTERVAL_MS = 60 * 1000;
@@ -434,13 +435,18 @@ export class StratumV1Client {
         }
 
         const networkConfig = this.configService.get('NETWORK');
-        let network;
+        let network: bitcoinjs.networks.Network;
 
         if (networkConfig === 'mainnet') {
-            network = bitcoinjs.networks.bitcoin;
-        } else if (networkConfig === 'testnet') {
-            network = bitcoinjs.networks.testnet;
+            network = elektronMainnet;
         } else if (networkConfig === 'regtest') {
+            network = elektronRegtest;
+        } else if (networkConfig === 'bitcoin-mainnet') {
+            // Escape hatch for testing against an upstream Bitcoin Core node.
+            network = bitcoinjs.networks.bitcoin;
+        } else if (networkConfig === 'bitcoin-testnet') {
+            network = bitcoinjs.networks.testnet;
+        } else if (networkConfig === 'bitcoin-regtest') {
             network = bitcoinjs.networks.regtest;
         } else {
             throw new Error('Invalid network configuration');

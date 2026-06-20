@@ -25,13 +25,18 @@ export class BitcoinRpcService implements OnModuleInit {
     }
 
     async onModuleInit() {
-        const url = this.configService.get('BITCOIN_RPC_URL');
-        let user = this.configService.get('BITCOIN_RPC_USER');
-        let pass = this.configService.get('BITCOIN_RPC_PASSWORD');
-        const port = parseInt(this.configService.get('BITCOIN_RPC_PORT'));
-        const timeout = parseInt(this.configService.get('BITCOIN_RPC_TIMEOUT'));
+        // Prefer ELEKTRON_RPC_* env vars; fall back to legacy BITCOIN_RPC_* names so
+        // existing deployments keep working during the rename.
+        const cfg = (newKey: string, oldKey: string) =>
+            this.configService.get(newKey) ?? this.configService.get(oldKey);
 
-        const cookiefile = this.configService.get('BITCOIN_RPC_COOKIEFILE');
+        const url = cfg('ELEKTRON_RPC_URL', 'BITCOIN_RPC_URL');
+        let user = cfg('ELEKTRON_RPC_USER', 'BITCOIN_RPC_USER');
+        let pass = cfg('ELEKTRON_RPC_PASSWORD', 'BITCOIN_RPC_PASSWORD');
+        const port = parseInt(cfg('ELEKTRON_RPC_PORT', 'BITCOIN_RPC_PORT'));
+        const timeout = parseInt(cfg('ELEKTRON_RPC_TIMEOUT', 'BITCOIN_RPC_TIMEOUT'));
+
+        const cookiefile = cfg('ELEKTRON_RPC_COOKIEFILE', 'BITCOIN_RPC_COOKIEFILE');
 
         if (cookiefile != undefined && cookiefile != '') {
             const cookie = fs.readFileSync(cookiefile).toString().trim().split(':');
@@ -51,12 +56,13 @@ export class BitcoinRpcService implements OnModuleInit {
         });
 
         this.callRpc('getrpcinfo').then(() => {
-            console.log('Bitcoin RPC connected');
+            console.log('Elektron RPC connected');
         }, () => {
             console.error('Could not reach RPC host');
         });
 
-        if (this.configService.get('BITCOIN_ZMQ_HOST')) {
+        const zmqHost = cfg('ELEKTRON_ZMQ_HOST', 'BITCOIN_ZMQ_HOST');
+        if (zmqHost) {
             console.log('Using ZMQ');
             const sock = new zmq.Subscriber;
 
@@ -69,7 +75,7 @@ export class BitcoinRpcService implements OnModuleInit {
                 console.log('ZMQ Unable to connect, Retrying');
             });
 
-            sock.connect(this.configService.get('BITCOIN_ZMQ_HOST'));
+            sock.connect(zmqHost);
             sock.subscribe('rawblock');
             // Don't await this, otherwise it will block the rest of the program
             this.listenForNewBlocks(sock);

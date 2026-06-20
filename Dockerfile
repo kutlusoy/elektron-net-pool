@@ -28,10 +28,10 @@ RUN npm i && npm run build
 
 FROM node:24.16.0-bookworm-slim
 
-# Expose ports for Stratum and Bitcoin RPC
+# Expose ports for Stratum and Elektron RPC
 EXPOSE 3333 3334 8332
 
-WORKDIR /public-pool
+WORKDIR /elektron-pool
 
 # Copy built binaries into the final image
 COPY --from=build /build .

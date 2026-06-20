@@ -11,6 +11,11 @@ export interface IJobTemplate {
 
     block: bitcoinjs.Block;
     merkle_branch: string[];
+    // Elektron Net: required coinbase outputs (UTXO attestation + witness commitment),
+    // passed through verbatim from getblocktemplate. Optional so legacy/Bitcoin
+    // templates without this field still work (falls back to block.witnessCommit).
+    coinbase_required_outputs?: { value: number; scriptPubKey: Buffer }[];
+    coinbase_script_sig_prefix?: Buffer;
     blockData: {
         id: string,
         creation: number,
@@ -42,9 +47,11 @@ export class StratumV1JobsService {
         private readonly bitcoinRpcService: BitcoinRpcService
     ) {
 
+        // Elektron block target is 60s, so refresh templates every 30s to ensure
+        // the UTXO attestation hash stays fresh between blocks.
         const refreshInterval$ = this.delay > 0
-            ? interval(60000).pipe(delay(this.delay), startWith(-1))
-            : interval(60000).pipe(startWith(-1));
+            ? interval(30000).pipe(delay(this.delay), startWith(-1))
+            : interval(30000).pipe(startWith(-1));
 
         this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, refreshInterval$]).pipe(
             switchMap(([miningInfo, interval]) => {
@@ -68,6 +75,9 @@ export class StratumV1JobsService {
 
                 const currentTime = Math.floor(new Date().getTime() / 1000);
                 const timestamp = blockTemplate.mintime > currentTime ? blockTemplate.mintime : currentTime;
+                const requiredOutputsSig = (blockTemplate.coinbase_required_outputs ?? [])
+                    .map(o => `${o.value}:${o.scriptPubKey}`)
+                    .join(',');
                 const workSignature = [
                     blockTemplate.previousblockhash,
                     blockTemplate.version,
@@ -75,6 +85,7 @@ export class StratumV1JobsService {
                     timestamp,
                     blockTemplate.height,
                     blockTemplate.coinbasevalue,
+                    requiredOutputsSig,
                     ...blockTemplate.transactions.map(tx => tx.hash ?? tx.txid ?? tx.data)
                 ].join('|');
 
@@ -82,6 +93,14 @@ export class StratumV1JobsService {
                     return null;
                 }
                 this.lastWorkSignature = workSignature;
+
+                const requiredOutputs = (blockTemplate.coinbase_required_outputs ?? []).map(o => ({
+                    value: o.value,
+                    scriptPubKey: Buffer.from(o.scriptPubKey, 'hex'),
+                }));
+                const scriptSigPrefix = blockTemplate.coinbase_script_sig_prefix
+                    ? Buffer.from(blockTemplate.coinbase_script_sig_prefix, 'hex')
+                    : undefined;
 
                 return {
                     version: blockTemplate.version,
@@ -92,11 +111,13 @@ export class StratumV1JobsService {
                     timestamp,
                     networkDifficulty: this.calculateNetworkDifficulty(parseInt(blockTemplate.bits, 16)),
                     clearJobs,
-                    height: blockTemplate.height
+                    height: blockTemplate.height,
+                    coinbase_required_outputs: requiredOutputs,
+                    coinbase_script_sig_prefix: scriptSigPrefix,
                 };
             }),
             filter(next => next != null),
-            map(({ version, bits, prevHash, transactions, timestamp, coinbasevalue, networkDifficulty, clearJobs, height }) => {
+            map(({ version, bits, prevHash, transactions, timestamp, coinbasevalue, networkDifficulty, clearJobs, height, coinbase_required_outputs, coinbase_script_sig_prefix }) => {
                 const block = new bitcoinjs.Block();
 
                 //create an empty coinbase tx
@@ -128,6 +149,8 @@ export class StratumV1JobsService {
                 return {
                     block,
                     merkle_branch,
+                    coinbase_required_outputs,
+                    coinbase_script_sig_prefix,
                     blockData: {
                         id,
                         creation: new Date().getTime(),

@@ -1,6 +1,20 @@
 ## Description
 
-A Nestjs and Typescript Bitcoin stratum mining server.
+A NestJS and TypeScript Stratum V1 mining pool server for **Elektron Net**
+(a Bitcoin Core C++20 fork with mandatory pruning, per-block UTXO attestation
+and 60 s block time — see `doc-elektron/BITCOIN_CORE_DIFF.md` and
+`doc-elektron/mining-pool-integration.md` in the elektron-net repo).
+
+This fork derives from `public-pool`. The Elektron-specific changes are:
+
+- Reads `coinbase_required_outputs` from `getblocktemplate` and appends them
+  verbatim to the coinbase (UTXO attestation + witness commitment, in that order).
+- Honours `coinbase_script_sig_prefix` when supplied by the node.
+- Accepts Bech32 addresses with the Elektron HRP `be` (`be1q…`) via
+  `bitcoinjs.address.toOutputScript`.
+- Template refresh tightened to 30 s (Elektron block target is 60 s).
+
+Requires an **Elektron Net node v4.0+** (protocol version 70017) as the RPC backend.
 
 ## Installation
 
@@ -8,7 +22,8 @@ A Nestjs and Typescript Bitcoin stratum mining server.
 $ npm install
 ```
 
-create an new .env file in the root directory and configure it with the parameters in .env.example
+Create a new `.env` file in the root directory and configure it with the
+parameters in `.env.example`.
 
 ## Running the app
 
@@ -35,7 +50,7 @@ $ npm run test:cov
 
 ## Web interface
 
-See [public-pool-ui](https://github.com/benjamin-wilson/public-pool-ui)
+See [elektron-net-pool-ui](https://github.com/kutlusoy/elektron-net-pool-ui).
 
 ## Deployment
 
@@ -64,13 +79,13 @@ with the default limit of `10000` allow up to `280000` connections on one port.
 Build container:
 
 ```bash
-$ docker build -t public-pool .
+$ docker build -t elektron-pool .
 ```
 
 Run container:
 
 ```bash
-$ docker container run --name public-pool --rm -p 3333:3333 -p 3334:3334 -p 8332:8332 -v .env:/public-pool/.env public-pool
+$ docker container run --name elektron-pool --rm -p 3333:3333 -p 3334:3334 -p 8332:8332 -v .env:/elektron-pool/.env elektron-pool
 ```
 
 ### Docker Compose
@@ -94,10 +109,20 @@ The docker-compose binds to `127.0.0.1` by default. To expose the Stratum servic
 +      - "3334"
 ```
 
-**note**: To successfully connect to the bitcoin RPC you will need to add
+**note**: To successfully connect to the Elektron RPC you will need to add
 
 ```
 rpcallowip=172.16.0.0/12
 ```
 
-to your bitcoin.conf.
+to your `elektron.conf`.
+
+## Migrating from a Bitcoin pool
+
+The `ELEKTRON_RPC_*` env vars are preferred; the legacy `BITCOIN_RPC_*` names
+still work as a fallback to ease migration. See `.env.example` for the full
+list.
+
+The `NETWORK` setting defaults to `mainnet` (Elektron mainnet, HRP `be`). For
+testing against an upstream Bitcoin Core node, set `NETWORK=bitcoin-mainnet`,
+`bitcoin-testnet` or `bitcoin-regtest`.
