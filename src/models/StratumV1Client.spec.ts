@@ -91,7 +91,7 @@ describe('StratumV1Client', () => {
                                 case 'DEV_FEE_ADDRESS':
                                     return 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4';
                                 case 'NETWORK':
-                                    return 'testnet';
+                                    return 'bitcoin-testnet';
                             }
                             return null;
                         })
@@ -130,7 +130,7 @@ describe('StratumV1Client', () => {
                 case 'DEV_FEE_ADDRESS':
                     return 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4';
                 case 'NETWORK':
-                    return 'testnet';
+                    return 'bitcoin-testnet';
             }
             return null;
         });
@@ -226,7 +226,7 @@ describe('StratumV1Client', () => {
                 case 'DEV_FEE_ADDRESS':
                     return 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4';
                 case 'NETWORK':
-                    return 'testnet';
+                    return 'bitcoin-testnet';
             }
             return null;
         });
@@ -249,7 +249,7 @@ describe('StratumV1Client', () => {
                 case 'DEV_FEE_ADDRESS':
                     return 'tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4';
                 case 'NETWORK':
-                    return 'testnet';
+                    return 'bitcoin-testnet';
             }
             return null;
         });

@@ -36,4 +36,11 @@ export interface IBlockTemplate {
     default_witness_commitment: string     // (string, optional) a valid witness commitment for the unmodified block template
     capabilities: string[]
 
+    // Elektron Net extensions (see doc-elektron/mining-pool-integration.md).
+    // [0] = UTXO attestation (OP_RETURN <height> <32-byte UTXO hash>), [1] = witness commitment.
+    // Order must be preserved verbatim; scriptPubKey hex bytes are copied 1:1 into coinbase outputs.
+    coinbase_required_outputs?: { value: number; scriptPubKey: string }[];
+    // Optional: scriptSig prefix the node expects (encoded BIP34 height push). When present,
+    // the miner uses this verbatim instead of computing the height encoding itself.
+    coinbase_script_sig_prefix?: string;
 }
