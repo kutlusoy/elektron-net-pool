@@ -8,13 +8,26 @@ and 60 s block time — see `doc-elektron/BITCOIN_CORE_DIFF.md` and
 This fork derives from `public-pool`. The Elektron-specific changes are:
 
 - Reads `coinbase_required_outputs` from `getblocktemplate` and appends them
-  verbatim to the coinbase (UTXO attestation + witness commitment, in that order).
+  verbatim to the coinbase (UTXO attestation + witness commitment, in that
+  order).
 - Honours `coinbase_script_sig_prefix` when supplied by the node.
 - Accepts Bech32 addresses with the Elektron HRP `be` (`be1q…`) via
   `bitcoinjs.address.toOutputScript`.
-- Template refresh tightened to 30 s (Elektron block target is 60 s).
+- Sets coinbase `nLockTime = height - 1` as required by consensus.
+- **Per-miner block templates.** The Elektron node computes the UTXO
+  attestation hash against the template's coinbase, including the payout
+  output. The pool therefore calls `getblocktemplate` separately for each
+  connected miner, passing the miner's payout address in the
+  `coinbaseaddress` parameter. Templates cannot be shared across miners as
+  in plain Bitcoin pools — a mismatch would be rejected as
+  `bad-utxo-attestation`. Each client refreshes its template on every new
+  block plus a 30 s safety timer.
+- **No dev/pool fee in the coinbase.** A second coinbase output would
+  change the bytes the attestation hash was computed against, so 100 % of
+  the block reward goes directly to the miner's authorized payout address.
 
-Requires an **Elektron Net node v4.0+** (protocol version 70017) as the RPC backend.
+Requires an **Elektron Net node v4.0+** (protocol version 70017) as the RPC
+backend.
 
 ## Installation
 
@@ -70,9 +83,16 @@ $ NODE_CLUSTER_SCHED_POLICY=none pm2 start ecosystem.config.js
 
 Cluster-mode connection dropping requires Node.js `22.12.0` or newer.
 
-`STRATUM_MAX_CONNECTIONS_PER_LISTENER` is enforced per worker and Stratum port.
-Size it using the busiest port: `worker count * limit`. For example, 28 workers
-with the default limit of `10000` allow up to `280000` connections on one port.
+### Sizing for Elektron Net
+
+Because each connected miner triggers its own `getblocktemplate` call on the
+Elektron node (per new block + every 30 s), the practical connection ceiling
+is bound by your node's RPC throughput, **not** raw socket capacity. The
+`STRATUM_MAX_CONNECTIONS_PER_LISTENER` cap (default `10000`) is enforced per
+worker and Stratum port, but you should set it well below that to match
+your node — start with `50`–`100` and scale once you've measured RPC load.
+The built-in backpressure monitor (`STRATUM_BACKPRESSURE_*`) also pauses
+accepts when the event loop or RSS goes red.
 
 ## Docker
 
@@ -126,3 +146,8 @@ list.
 The `NETWORK` setting defaults to `mainnet` (Elektron mainnet, HRP `be`). For
 testing against an upstream Bitcoin Core node, set `NETWORK=bitcoin-mainnet`,
 `bitcoin-testnet` or `bitcoin-regtest`.
+
+`DEV_FEE_ADDRESS` from upstream `public-pool` is ignored: Elektron's per-block
+UTXO attestation pins the coinbase to a single payout output, so the pool
+cannot insert a fee split. Operators who want to charge fees must collect
+them off-chain (e.g. periodic transfers from miner addresses).
