@@ -115,41 +115,28 @@ export class BitcoinRpcService implements OnModuleInit {
         }
     }
 
-    public async getBlockTemplate(blockHeight: number): Promise<IBlockTemplate> {
+    // Elektron Net: the node computes the per-block UTXO attestation hash against
+    // the template's coinbase, which uses the address passed in `coinbaseaddress`.
+    // The pool must request a separate template per miner payout address —
+    // otherwise the submitted coinbase output won't match the template and the
+    // node rejects the block with `bad-utxo-attestation`. A single template
+    // cannot be shared across miners as in plain Bitcoin pools.
+    public async getBlockTemplate(coinbaseAddress: string): Promise<IBlockTemplate> {
+        if (!coinbaseAddress) {
+            throw new Error('getBlockTemplate requires coinbaseAddress for Elektron Net UTXO attestation');
+        }
         let result: IBlockTemplate;
         try {
-            const block = await this.rpcBlockService.getBlock(blockHeight);
-            const completeBlock = block?.data != null;
-
-            // If the block has already been loaded, and the same instance is fetching the template again, we just need to refresh it.
-            if (completeBlock && block.lockedBy == process.env.NODE_APP_INSTANCE) {
-                result = await this.loadBlockTemplate(blockHeight);
-            }
-            else if (completeBlock) {
-                return Promise.resolve(JSON.parse(block.data));
-            } else if (!completeBlock) {
-                if (process.env.NODE_APP_INSTANCE != null) {
-                    // There is a unique constraint on the block height so if another process tries to lock, it'll throw
-                    try {
-                        await this.rpcBlockService.lockBlock(blockHeight, process.env.NODE_APP_INSTANCE);
-                    } catch (e) {
-                        result = await this.waitForBlock(blockHeight);
-                    }
-                }
-                result = await this.loadBlockTemplate(blockHeight);
-            } else {
-                //wait for block
-                result = await this.waitForBlock(blockHeight);
-            }
+            result = await this.loadBlockTemplate(coinbaseAddress);
         } catch (e) {
             console.error('Error getblocktemplate:', e.message);
             throw new Error('Error getblocktemplate');
         }
-        console.log(`getblocktemplate tx count: ${result.transactions.length}`);
+        console.log(`getblocktemplate tx count: ${result.transactions.length} (addr=${coinbaseAddress})`);
         return result;
     }
 
-    private async loadBlockTemplate(blockHeight: number) {
+    private async loadBlockTemplate(coinbaseAddress: string) {
 
         let blockTemplate: IBlockTemplate;
         while (blockTemplate == null) {
@@ -157,13 +144,11 @@ export class BitcoinRpcService implements OnModuleInit {
                 {
                     rules: ['segwit'],
                     mode: 'template',
-                    capabilities: ['serverlist', 'proposal']
+                    capabilities: ['serverlist', 'proposal'],
+                    coinbaseaddress: coinbaseAddress
                 }
             ]);
         }
-
-
-        await this.rpcBlockService.saveBlock(blockHeight, JSON.stringify(blockTemplate));
 
         return blockTemplate;
     }
