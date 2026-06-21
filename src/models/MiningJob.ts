@@ -4,10 +4,8 @@ import { IJobTemplate } from '../services/stratum-v1-jobs.service';
 import { eResponseMethod } from './enums/eResponseMethod';
 import { IMiningNotify } from './stratum-messages/IMiningNotify';
 import { ConfigService } from '@nestjs/config';
-import { TOTAL_EXTRANONCE_SIZE_BYTES } from './stratum.constants';
 
 const MAX_BLOCK_WEIGHT = 4000000;
-const MAX_SCRIPT_SIZE = 100; //   https://github.com/bitcoin/bitcoin/blob/ffdc3d6060f6e65e69cf115a13b83e6eb4a0a0a8/src/consensus/tx_check.cpp#L49
 interface AddressObject {
     address: string;
     percent: number;
@@ -42,36 +40,21 @@ export class MiningJob {
         // doc-elektron/mining-pool-integration.md §9 and src/node/miner.cpp:198).
         this.coinbaseTransaction.locktime = jobTemplate.blockData.height - 1;
 
-        // Build the scriptSig prefix (BIP34 height push). For Elektron Net, the node may supply
-        // `coinbase_script_sig_prefix` verbatim — if present, use it instead of self-encoding.
-        // Layout: <prefix bytes> <pool identifier> <padding for extranonce>
+        // Elektron Net: the UTXO attestation in the GBT template is bound to a
+        // coinbase whose scriptSig is exactly the node-supplied prefix (BIP34
+        // height push). Any extra bytes — pool identifier, extranonce padding
+        // — would change the coinbase txid and break the attestation. So this
+        // is the FULL scriptSig; workers vary only header bits.
         let blockHeightPrefix: Buffer;
         if (jobTemplate.coinbase_script_sig_prefix && jobTemplate.coinbase_script_sig_prefix.length > 0) {
             blockHeightPrefix = jobTemplate.coinbase_script_sig_prefix;
         } else {
-            // Encode the block height (BIP34)
             const blockHeightEncoded = bitcoinjs.script.number.encode(jobTemplate.blockData.height);
             const blockHeightLengthByte = Buffer.from([blockHeightEncoded.length]);
             blockHeightPrefix = Buffer.concat([blockHeightLengthByte, blockHeightEncoded]);
         }
 
-        const poolIdentifier = configService.get('POOL_IDENTIFIER') || 'Public-Pool';
-        const extra = Buffer.from(poolIdentifier);
-
-        // Padding so the extranonce region always lands at a known offset.
-        // Original formula: EXTRANONCE + (3 - encoded_height_length); since
-        // blockHeightPrefix = length_byte + encoded_height_bytes, prefix.length = 1 + encoded_length.
-        // → padding = EXTRANONCE + 4 - prefix.length, clamped to 0.
-        const paddingSize = Math.max(0, TOTAL_EXTRANONCE_SIZE_BYTES + 4 - blockHeightPrefix.length);
-        const padding = Buffer.alloc(paddingSize, 0);
-
-        let script = Buffer.concat([blockHeightPrefix, extra, padding]);
-        if (script.length > MAX_SCRIPT_SIZE) {
-            console.warn('Pool identifier is too long, removing the pool identifier');
-            script = Buffer.concat([blockHeightPrefix, padding]);
-        }
-
-        this.coinbaseTransaction.ins[0].script = script;
+        this.coinbaseTransaction.ins[0].script = blockHeightPrefix;
 
         // Elektron Net: append all `coinbase_required_outputs` from GBT verbatim, in order.
         //   [0] = UTXO attestation (OP_RETURN <height> <32-byte UTXO hash>)
@@ -92,37 +75,26 @@ export class MiningJob {
         }
 
         if ((this.coinbaseTransaction.weight() + jobTemplate.block.weight()) > MAX_BLOCK_WEIGHT) {
-            console.warn('Block weight exceeds the maximum allowed weight, removing the pool identifier');
-            this.coinbaseTransaction.ins[0].script = Buffer.concat([blockHeightPrefix, padding]);
+            throw new Error('Block weight exceeds the maximum allowed weight');
         }
 
-        // get the non-witness coinbase tx
+        // Coinbase is not split (extranonce size = 0); the entire serialized
+        // tx is sent as coinb1 with an empty coinb2 so the miner can't insert
+        // bytes that would shift the txid.
         //@ts-ignore
-        const serializedCoinbaseTx = this.coinbaseTransaction.__toBuffer().toString('hex');
-
-        const inputScript = this.coinbaseTransaction.ins[0].script.toString('hex');
-
-        const partOneIndex = serializedCoinbaseTx.indexOf(inputScript) + inputScript.length;
-
-        this.coinbasePart1 = serializedCoinbaseTx.slice(0, partOneIndex - (TOTAL_EXTRANONCE_SIZE_BYTES * 2));
-        this.coinbasePart2 = serializedCoinbaseTx.slice(partOneIndex);
+        this.coinbasePart1 = this.coinbaseTransaction.__toBuffer().toString('hex');
+        this.coinbasePart2 = '';
         this.coinbasePart1Buffer = Buffer.from(this.coinbasePart1, 'hex');
-        this.coinbasePart2Buffer = Buffer.from(this.coinbasePart2, 'hex');
-
-
+        this.coinbasePart2Buffer = Buffer.alloc(0);
     }
 
     public cloneCoinbaseTransaction(): bitcoinjs.Transaction {
         return bitcoinjs.Transaction.fromBuffer(this.coinbaseTransaction.toBuffer());
     }
 
-    public buildHeaderBuffer(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): Buffer {
-        const coinbaseBuffer = Buffer.concat([
-            this.coinbasePart1Buffer,
-            Buffer.from(`${extraNonce}${extraNonce2}`, 'hex'),
-            this.coinbasePart2Buffer,
-        ]);
-        const coinbaseHash = bitcoinjs.crypto.hash256(coinbaseBuffer);
+    public buildHeaderBuffer(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): Buffer {
+        // Coinbase is fixed (no extranonce); just hash coinbasePart1Buffer directly.
+        const coinbaseHash = bitcoinjs.crypto.hash256(this.coinbasePart1Buffer);
         const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, this.merkleBranchBuffers);
 
         let version = jobTemplate.block.version;
@@ -141,31 +113,25 @@ export class MiningJob {
         return header;
     }
 
-    public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): bitcoinjs.Block {
+    public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);
         testBlock.transactions = jobTemplate.block.transactions.map(tx => {
             return Object.assign(new bitcoinjs.Transaction(), tx);
         });
 
+        // Coinbase is taken verbatim — no scriptSig mutation. Merkle root only
+        // needs recomputation because the placeholder coinbase from the template
+        // had a different shape; the actual coinbase here is our payout one.
         testBlock.transactions[0] = this.cloneCoinbaseTransaction();
 
         testBlock.nonce = nonce;
 
-        // recompute version mask
         if (versionMask !== undefined && versionMask != 0) {
             testBlock.version = (testBlock.version ^ versionMask);
         }
 
-        // set the nonces
-        const nonceScript = testBlock.transactions[0].ins[0].script.toString('hex');
-
-        testBlock.transactions[0].ins[0].script = Buffer.from(`${nonceScript.substring(0, nonceScript.length - (TOTAL_EXTRANONCE_SIZE_BYTES * 2))}${extraNonce}${extraNonce2}`, 'hex');
-
-        //recompute the root since we updated the coinbase script with the nonces
         testBlock.merkleRoot = this.calculateMerkleRootHash(testBlock.transactions[0].getHash(false), this.merkleBranchBuffers);
-
-
         testBlock.timestamp = timestamp;
 
         return testBlock;
