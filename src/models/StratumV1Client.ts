@@ -4,7 +4,7 @@ import { plainToInstance } from 'class-transformer';
 import { validate, ValidationError, ValidatorOptions } from 'class-validator';
 import * as crypto from 'crypto';
 import { Socket } from 'net';
-import { firstValueFrom, Subscription } from 'rxjs';
+import { Subscription } from 'rxjs';
 import { clearInterval } from 'timers';
 
 import { AddressSettingsService } from '../ORM/address-settings/address-settings.service';
@@ -392,12 +392,13 @@ export class StratumV1Client {
             }
         }
 
-        this.stratumSubscription = this.stratumV1JobsService.newMiningJob$.subscribe(async (jobTemplate) => {
+        // Elektron Net: each miner needs its own getblocktemplate call with its
+        // payout address (UTXO attestation is bound to the coinbase output).
+        // Subscribe to the node's new-block stream and also refresh on a timer so
+        // jobs don't go stale between blocks.
+        this.stratumSubscription = this.bitcoinRpcService.newBlock$.subscribe(async () => {
             try {
-                if(jobTemplate.blockData.clearJobs){
-                    this.miningSubmissionHashes.clear();
-                }
-                await this.sendNewMiningJob(jobTemplate);
+                await this.refreshMiningJob();
             } catch (e) {
                 await this.socket.end();
                 console.error(e);
@@ -410,29 +411,43 @@ export class StratumV1Client {
             }, 60 * 1000)
         );
 
+        this.backgroundWork.push(
+            setInterval(async () => {
+                try {
+                    await this.refreshMiningJob();
+                } catch (e) {
+                    console.error(`Periodic template refresh failed for ${this.clientAuthorization?.address}: ${e?.message ?? e}`);
+                }
+            }, 30 * 1000)
+        );
+
+    }
+
+    private async refreshMiningJob() {
+        if (!this.clientAuthorization?.address) {
+            return;
+        }
+        const jobTemplate = await this.stratumV1JobsService.buildTemplateFor(this.clientAuthorization.address);
+        if (jobTemplate.blockData.clearJobs) {
+            this.miningSubmissionHashes.clear();
+        }
+        await this.sendNewMiningJob(jobTemplate);
     }
 
     private async sendNewMiningJob(jobTemplate: IJobTemplate) {
 
-        let payoutInformation;
-        const devFeeAddress = this.configService.get('DEV_FEE_ADDRESS');
-        //50Th/s
-        this.noFee = false;
+        // Elektron Net: the UTXO attestation hash committed to in the template's
+        // coinbase is computed against a single payout output to the miner's
+        // address. Multiple outputs (e.g. a dev-fee split) would change the
+        // coinbase and break the attestation, so the pool pays the full reward
+        // directly to the miner's authorized address. No pool fee, no dev fee.
+        this.noFee = true;
         if (this.entity) {
             this.hashRate = this.statistics.hashRate;
-            this.noFee = this.hashRate != 0 && this.hashRate < 50000000000000;
         }
-        if (this.noFee || devFeeAddress == null || devFeeAddress.length < 1) {
-            payoutInformation = [
-                { address: this.clientAuthorization.address, percent: 100 }
-            ];
-
-        } else {
-            payoutInformation = [
-                { address: devFeeAddress, percent: 1.5 },
-                { address: this.clientAuthorization.address, percent: 98.5 }
-            ];
-        }
+        const payoutInformation = [
+            { address: this.clientAuthorization.address, percent: 100 }
+        ];
 
         const networkConfig = this.configService.get('NETWORK');
         let network: bitcoinjs.networks.Network;
@@ -670,14 +685,13 @@ export class StratumV1Client {
 
             await this.socket.write(data);
 
-            const jobTemplate = await firstValueFrom(this.stratumV1JobsService.newMiningJob$);
+            const jobTemplate = await this.stratumV1JobsService.buildTemplateFor(this.clientAuthorization.address);
             const nextTimestamp = Math.max(
                 jobTemplate.block.timestamp,
                 Math.floor(Date.now() / 1000),
                 (this.lastSentMiningJobTimestamp ?? 0) + 1
             );
-            // We need to clear jobs so the difficulty takes effect, but avoid mutating or
-            // re-sending the shared cached template with byte-identical work.
+            // Clear jobs so the difficulty takes effect without re-sending byte-identical work.
             const refreshedJobTemplate: IJobTemplate = {
                 ...jobTemplate,
                 block: Object.assign(new bitcoinjs.Block(), jobTemplate.block, {
