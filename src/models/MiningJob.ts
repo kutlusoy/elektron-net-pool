@@ -38,6 +38,9 @@ export class MiningJob {
         this.merkleBranchBuffers = jobTemplate.merkle_branch.map(branch => Buffer.from(branch, 'hex'));
 
         this.coinbaseTransaction = this.createCoinbaseTransaction(payoutInformation, jobTemplate.blockData.coinbasevalue);
+        // Elektron Net consensus: coinbase nLockTime must equal height - 1 (see
+        // doc-elektron/mining-pool-integration.md §9 and src/node/miner.cpp:198).
+        this.coinbaseTransaction.locktime = jobTemplate.blockData.height - 1;
 
         // Build the scriptSig prefix (BIP34 height push). For Elektron Net, the node may supply
         // `coinbase_script_sig_prefix` verbatim — if present, use it instead of self-encoding.
