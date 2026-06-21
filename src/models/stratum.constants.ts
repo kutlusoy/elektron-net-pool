@@ -7,3 +7,9 @@
 export const EXTRANONCE1_SIZE_BYTES = 0;
 export const EXTRANONCE2_SIZE_BYTES = 0;
 export const TOTAL_EXTRANONCE_SIZE_BYTES = EXTRANONCE1_SIZE_BYTES + EXTRANONCE2_SIZE_BYTES;
+
+// Per-connection session id (used as the mining.notify subscription channel
+// tag, NOT as coinbase bytes). Independent of extranonce so that header-only
+// mining still has a non-empty session identifier — most ASIC firmwares
+// reject a subscription response with an empty channel id.
+export const SESSION_ID_SIZE_BYTES = 4;
