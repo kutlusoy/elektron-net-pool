@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 import * as bitcoinjs from 'bitcoinjs-lib';
 import * as merkle from 'merkle-lib';
 import * as merkleProof from 'merkle-lib/proof';
-import { combineLatest, delay, filter, from, interval, map, Observable, shareReplay, startWith, switchMap, tap } from 'rxjs';
 
 import { MiningJob } from '../models/MiningJob';
 import { BitcoinRpcService } from './bitcoin-rpc.service';
@@ -29,161 +28,108 @@ export interface IJobTemplate {
 @Injectable()
 export class StratumV1JobsService {
 
-    public newMiningJob$: Observable<IJobTemplate>;
-
     public latestJobId: number = 1;
     public latestJobTemplateId: number = 1;
 
     public jobs: { [jobId: string]: MiningJob } = {};
 
-    public blocks: { [id: number]: IJobTemplate } = {};
+    public blocks: { [id: string]: IJobTemplate } = {};
 
-    // offset the interval so that all the cluster processes don't try and refresh at the same time.
-    private delay = process.env.NODE_APP_INSTANCE == null ? 0 : parseInt(process.env.NODE_APP_INSTANCE) * 5000;
-    private lastBlockHeight = 0;
-    private lastWorkSignature: string;
+    // Track the tip height the last template was fetched at, per miner address.
+    // Used by clients to decide whether to clear active jobs when a new template
+    // arrives at a higher height.
+    private lastTemplateHeightByAddress: { [address: string]: number } = {};
 
     constructor(
         private readonly bitcoinRpcService: BitcoinRpcService
     ) {
+    }
 
-        // Elektron block target is 60s, so refresh templates every 30s to ensure
-        // the UTXO attestation hash stays fresh between blocks.
-        const refreshInterval$ = this.delay > 0
-            ? interval(30000).pipe(delay(this.delay), startWith(-1))
-            : interval(30000).pipe(startWith(-1));
+    // Elektron Net: build a fresh job template for a specific miner payout address.
+    // The node-side UTXO attestation hash is bound to the coinbase output the node
+    // assumed at template time, so every miner needs its own `getblocktemplate`
+    // call with their `coinbaseaddress`. Shared templates can never be used.
+    public async buildTemplateFor(coinbaseAddress: string): Promise<IJobTemplate> {
+        const blockTemplate = await this.bitcoinRpcService.getBlockTemplate(coinbaseAddress);
 
-        this.newMiningJob$ = combineLatest([this.bitcoinRpcService.newBlock$, refreshInterval$]).pipe(
-            switchMap(([miningInfo, interval]) => {
-                return from(this.bitcoinRpcService.getBlockTemplate(miningInfo.blocks)).pipe(map((blockTemplate) => {
-                    return {
-                        blockTemplate,
-                        miningInfo
-                    }
-                }))
-            }),
-            map(({ blockTemplate, miningInfo }) => {
+        const currentTime = Math.floor(new Date().getTime() / 1000);
+        const timestamp = blockTemplate.mintime > currentTime ? blockTemplate.mintime : currentTime;
 
-                let clearJobs = false;
-                const currentBlockHeight = miningInfo.blocks;
+        const previousHeight = this.lastTemplateHeightByAddress[coinbaseAddress] ?? 0;
+        const clearJobs = previousHeight !== blockTemplate.height;
+        this.lastTemplateHeightByAddress[coinbaseAddress] = blockTemplate.height;
 
-                if (this.lastBlockHeight == 0 || this.lastBlockHeight != currentBlockHeight) {
-                    clearJobs = true;
-                    this.lastBlockHeight = currentBlockHeight;
-                    console.log('new block');
+        const requiredOutputs = (blockTemplate.coinbase_required_outputs ?? []).map(o => ({
+            value: o.value,
+            scriptPubKey: Buffer.from(o.scriptPubKey, 'hex'),
+        }));
+        const scriptSigPrefix = blockTemplate.coinbase_script_sig_prefix
+            ? Buffer.from(blockTemplate.coinbase_script_sig_prefix, 'hex')
+            : undefined;
+
+        const block = new bitcoinjs.Block();
+        const transactions = blockTemplate.transactions.map(t => bitcoinjs.Transaction.fromHex(t.data));
+
+        // Placeholder coinbase so the Merkle branch computation has the right shape;
+        // the real coinbase is built per-job in MiningJob.
+        const tempCoinbaseTx = new bitcoinjs.Transaction();
+        tempCoinbaseTx.version = 2;
+        tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
+        tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
+        transactions.unshift(tempCoinbaseTx);
+
+        const transactionBuffers = transactions.map(tx => tx.getHash(false));
+
+        const merkleTree = merkle(transactionBuffers, bitcoinjs.crypto.hash256);
+        const merkleBranches: Buffer[] = merkleProof(merkleTree, transactionBuffers[0]).filter(h => h != null);
+        block.merkleRoot = merkleBranches.pop();
+        const merkle_branch = merkleBranches.slice(1, merkleBranches.length).map(b => b.toString('hex'));
+
+        block.prevHash = this.convertToLittleEndian(blockTemplate.previousblockhash);
+        block.version = blockTemplate.version;
+        block.bits = parseInt(blockTemplate.bits, 16);
+        block.timestamp = timestamp;
+        block.transactions = transactions;
+        block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(transactions, true);
+
+        const id = this.getNextTemplateId();
+        this.latestJobTemplateId++;
+
+        const jobTemplate: IJobTemplate = {
+            block,
+            merkle_branch,
+            coinbase_required_outputs: requiredOutputs,
+            coinbase_script_sig_prefix: scriptSigPrefix,
+            blockData: {
+                id,
+                creation: new Date().getTime(),
+                coinbasevalue: blockTemplate.coinbasevalue,
+                networkDifficulty: this.calculateNetworkDifficulty(parseInt(blockTemplate.bits, 16)),
+                height: blockTemplate.height,
+                clearJobs
+            }
+        };
+
+        if (clearJobs) {
+            // A new tip means every active job is stale (different prev hash / attestation).
+            this.blocks = {};
+            this.jobs = {};
+        } else {
+            const now = new Date().getTime();
+            for (const templateId in this.blocks) {
+                if (now - this.blocks[templateId].blockData.creation > (1000 * 60 * 5)) {
+                    delete this.blocks[templateId];
                 }
-
-                const currentTime = Math.floor(new Date().getTime() / 1000);
-                const timestamp = blockTemplate.mintime > currentTime ? blockTemplate.mintime : currentTime;
-                const requiredOutputsSig = (blockTemplate.coinbase_required_outputs ?? [])
-                    .map(o => `${o.value}:${o.scriptPubKey}`)
-                    .join(',');
-                const workSignature = [
-                    blockTemplate.previousblockhash,
-                    blockTemplate.version,
-                    blockTemplate.bits,
-                    timestamp,
-                    blockTemplate.height,
-                    blockTemplate.coinbasevalue,
-                    requiredOutputsSig,
-                    ...blockTemplate.transactions.map(tx => tx.hash ?? tx.txid ?? tx.data)
-                ].join('|');
-
-                if (!clearJobs && workSignature === this.lastWorkSignature) {
-                    return null;
+            }
+            for (const jobId in this.jobs) {
+                if (now - this.jobs[jobId].creation > (1000 * 60 * 5)) {
+                    delete this.jobs[jobId];
                 }
-                this.lastWorkSignature = workSignature;
+            }
+        }
+        this.blocks[id] = jobTemplate;
 
-                const requiredOutputs = (blockTemplate.coinbase_required_outputs ?? []).map(o => ({
-                    value: o.value,
-                    scriptPubKey: Buffer.from(o.scriptPubKey, 'hex'),
-                }));
-                const scriptSigPrefix = blockTemplate.coinbase_script_sig_prefix
-                    ? Buffer.from(blockTemplate.coinbase_script_sig_prefix, 'hex')
-                    : undefined;
-
-                return {
-                    version: blockTemplate.version,
-                    bits: parseInt(blockTemplate.bits, 16),
-                    prevHash: this.convertToLittleEndian(blockTemplate.previousblockhash),
-                    transactions: blockTemplate.transactions.map(t => bitcoinjs.Transaction.fromHex(t.data)),
-                    coinbasevalue: blockTemplate.coinbasevalue,
-                    timestamp,
-                    networkDifficulty: this.calculateNetworkDifficulty(parseInt(blockTemplate.bits, 16)),
-                    clearJobs,
-                    height: blockTemplate.height,
-                    coinbase_required_outputs: requiredOutputs,
-                    coinbase_script_sig_prefix: scriptSigPrefix,
-                };
-            }),
-            filter(next => next != null),
-            map(({ version, bits, prevHash, transactions, timestamp, coinbasevalue, networkDifficulty, clearJobs, height, coinbase_required_outputs, coinbase_script_sig_prefix }) => {
-                const block = new bitcoinjs.Block();
-
-                //create an empty coinbase tx
-                const tempCoinbaseTx = new bitcoinjs.Transaction();
-                tempCoinbaseTx.version = 2;
-                tempCoinbaseTx.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-                tempCoinbaseTx.ins[0].witness = [Buffer.alloc(32, 0)];
-                transactions.unshift(tempCoinbaseTx);
-
-                const transactionBuffers = transactions.map(tx => tx.getHash(false));
-
-                const merkleTree = merkle(transactionBuffers, bitcoinjs.crypto.hash256);
-                const merkleBranches: Buffer[] = merkleProof(merkleTree, transactionBuffers[0]).filter(h => h != null);
-                block.merkleRoot = merkleBranches.pop();
-
-                // remove the first (coinbase) and last (root) element from the branch
-                const merkle_branch = merkleBranches.slice(1, merkleBranches.length).map(b => b.toString('hex'))
-
-                block.prevHash = prevHash;
-                block.version = version;
-                block.bits = bits;
-                block.timestamp = timestamp;
-
-                block.transactions = transactions;
-                block.witnessCommit = bitcoinjs.Block.calculateMerkleRoot(transactions, true);
-
-                const id = this.getNextTemplateId();
-                this.latestJobTemplateId++;
-                return {
-                    block,
-                    merkle_branch,
-                    coinbase_required_outputs,
-                    coinbase_script_sig_prefix,
-                    blockData: {
-                        id,
-                        creation: new Date().getTime(),
-                        coinbasevalue,
-                        networkDifficulty,
-                        height,
-                        clearJobs
-                    }
-                }
-            }),
-            tap((data) => {
-                if (data.blockData.clearJobs) {
-                    this.blocks = {};
-                    this.jobs = {};
-                }else{
-                    const now = new Date().getTime();
-                    // Delete old templates (5 minutes)
-                    for(const templateId in this.blocks){
-                        if(now - this.blocks[templateId].blockData.creation  > (1000 * 60 * 5)){
-                            delete this.blocks[templateId];
-                        }
-                    }
-                    // Delete old jobs (5 minutes)
-                    for (const jobId in this.jobs) {
-                        if(now - this.jobs[jobId].creation > (1000 * 60 * 5)){
-                            delete this.jobs[jobId];
-                        }
-                    }
-                }
-                this.blocks[data.blockData.id] = data;
-            }),
-            shareReplay({ refCount: true, bufferSize: 1 })
-        )
+        return jobTemplate;
     }
 
     private calculateNetworkDifficulty(nBits: number) {
