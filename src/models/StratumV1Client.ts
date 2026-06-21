@@ -24,7 +24,7 @@ import { ConfigurationMessage } from './stratum-messages/ConfigurationMessage';
 import { MiningSubmitMessage } from './stratum-messages/MiningSubmitMessage';
 import { StratumErrorMessage } from './stratum-messages/StratumErrorMessage';
 import { SubscriptionMessage } from './stratum-messages/SubscriptionMessage';
-import { EXTRANONCE1_SIZE_BYTES } from './stratum.constants';
+import { SESSION_ID_SIZE_BYTES } from './stratum.constants';
 import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
@@ -116,7 +116,9 @@ export class StratumV1Client {
     }
 
     private getRandomHexString() {
-        const randomBytes = crypto.randomBytes(EXTRANONCE1_SIZE_BYTES);
+        // Session id only — see comment in stratum.constants.ts. Not the
+        // coinbase extranonce (which is size 0 for header-only mining).
+        const randomBytes = crypto.randomBytes(SESSION_ID_SIZE_BYTES);
         return randomBytes.toString('hex');
     }
 
