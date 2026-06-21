@@ -599,17 +599,22 @@ export class StratumV1Client {
                 );
                 const blockHex = updatedJobBlock.toHex(false);
                 const result = await this.bitcoinRpcService.SUBMIT_BLOCK(blockHex);
-                await this.blocksService.save({
-                    height: jobTemplate.blockData.height,
-                    minerAddress: this.clientAuthorization.address,
-                    worker: this.clientAuthorization.worker,
-                    sessionId: this.extraNonceAndSessionId,
-                    blockData: blockHex
-                });
+                // SUBMIT_BLOCK returns 'SUCCESS!' when the node accepted the block
+                // (null RPC response per `submitblock`). Any other value is the
+                // node's rejection reason (e.g. `bad-utxo-attestation`). Only
+                // persist accepted blocks in the Found Blocks table and reset
+                // best-difficulty counters on a real win — otherwise rejected
+                // attempts would pollute the dashboard.
+                if (result === 'SUCCESS!') {
+                    await this.blocksService.save({
+                        height: jobTemplate.blockData.height,
+                        minerAddress: this.clientAuthorization.address,
+                        worker: this.clientAuthorization.worker,
+                        sessionId: this.extraNonceAndSessionId,
+                        blockData: blockHex
+                    });
 
-                await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, updatedJobBlock, result);
-                //success
-                if (result == null) {
+                    await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, updatedJobBlock, result);
                     await this.addressSettingsService.resetBestDifficultyAndShares();
                 }
             }
