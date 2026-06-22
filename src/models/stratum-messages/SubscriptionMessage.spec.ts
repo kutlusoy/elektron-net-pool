@@ -26,18 +26,21 @@ describe('SubscriptionMessage', () => {
         expect(message.userAgent).toBe('unknown');
     });
 
-    it('should respond with empty extranonce1 and zero extranonce2_size (header-only mining)', () => {
+    it('should respond with session-id extranonce1 and zero extranonce2_size (header-only mining)', () => {
         const message = plainToInstance(
             SubscriptionMessage,
             JSON.parse('{"id":1,"method":"mining.subscribe","params":["bitaxe v2.2"]}')
         );
 
+        // extranonce1 is non-empty so ASIC firmwares accept the subscribe
+        // response (most reject empty extranonce1). extranonce2_size = 0 so
+        // miners do not iterate the coinbase.
         expect(message.response('57a6f098')).toEqual({
             id: 1,
             error: null,
             result: [
                 [['mining.notify', '57a6f098']],
-                '',
+                '57a6f098',
                 0
             ]
         });

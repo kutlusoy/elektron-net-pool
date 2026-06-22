@@ -25,10 +25,20 @@ export class SubscriptionMessage extends StratumBaseMessage {
     }
 
     public response(clientId: string) {
-        // Header-only mining (Elektron Net): we keep `clientId` as the session
-        // tag but it is NOT used as extranonce1 — coinbase is sent through
-        // unchanged. `extranonce1` is emitted as an empty hex string and
-        // `extranonce2_size` is 0 so miners don't try to extend the coinbase.
+        // Header-only mining (Elektron Net): the coinbase must be sent through
+        // unchanged for the UTXO attestation to validate. We therefore set
+        // `extranonce2_size = 0` so miners do not iterate any bytes into the
+        // coinbase scriptSig.
+        //
+        // We DO send a non-empty `extranonce1` (the per-connection session id)
+        // because many ASIC firmwares (Bitaxe ESP-Miner, NerdMiner, BraiinsOS,
+        // stock Bitmain) reject a subscribe response with an empty extranonce1
+        // — they fail JSON validation client-side and close the TCP socket
+        // immediately, leading to a 1–2 Hz reconnect loop. With size_2 = 0 the
+        // miner builds the coinbase as `coinb1 + extranonce1 + coinb2`. The
+        // pool's `MiningJob` therefore splits the serialized coinbase around
+        // a length-SESSION_ID_SIZE_BYTES hole that gets filled by extranonce1
+        // (see MiningJob.ts).
         return {
             id: this.id,
             error: null,
@@ -36,7 +46,7 @@ export class SubscriptionMessage extends StratumBaseMessage {
                 [
                     ['mining.notify', clientId]
                 ],
-                EXTRANONCE1_SIZE_BYTES === 0 ? '' : clientId,
+                clientId,
                 EXTRANONCE2_SIZE_BYTES
             ]
         }
