@@ -24,7 +24,7 @@ import { ConfigurationMessage } from './stratum-messages/ConfigurationMessage';
 import { MiningSubmitMessage } from './stratum-messages/MiningSubmitMessage';
 import { StratumErrorMessage } from './stratum-messages/StratumErrorMessage';
 import { SubscriptionMessage } from './stratum-messages/SubscriptionMessage';
-import { SESSION_ID_SIZE_BYTES } from './stratum.constants';
+import { EXTRANONCE1_SIZE_BYTES } from './stratum.constants';
 import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
@@ -116,9 +116,11 @@ export class StratumV1Client {
     }
 
     private getRandomHexString() {
-        // Session id only — see comment in stratum.constants.ts. Not the
-        // coinbase extranonce (which is size 0 for header-only mining).
-        const randomBytes = crypto.randomBytes(SESSION_ID_SIZE_BYTES);
+        // Per-connection session id, emitted as extranonce1 in the subscribe
+        // response so the ASIC firmware accepts the connection. See
+        // stratum.constants.ts for why this has to be non-empty even though
+        // we run header-only mining.
+        const randomBytes = crypto.randomBytes(EXTRANONCE1_SIZE_BYTES);
         return randomBytes.toString('hex');
     }
 
@@ -163,7 +165,7 @@ export class StratumV1Client {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService);
                         this.extraNonceAndSessionId = this.getRandomHexString();
-                        console.log(`New client ID: : ${this.extraNonceAndSessionId}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
+                        console.log(`New client ID: ${this.extraNonceAndSessionId}, userAgent=${subscriptionMessage.userAgent}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
 
                     this.clientSubscription = subscriptionMessage;

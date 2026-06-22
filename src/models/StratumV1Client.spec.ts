@@ -214,8 +214,9 @@ describe('StratumV1Client', () => {
 
         await new Promise((r) => setTimeout(r, 1));
 
-        // Header-only mining: extranonce1 is empty, extranonce2_size is 0.
-        expect(socket.write).toHaveBeenCalledWith(`{"id":1,"error":null,"result":[[["mining.notify","${client.extraNonceAndSessionId}"]],"",0]}\n`, expect.any(Function));
+        // Header-only mining: extranonce1 = session id (firmware compat),
+        // extranonce2_size = 0 (miner does not iterate coinbase).
+        expect(socket.write).toHaveBeenCalledWith(`{"id":1,"error":null,"result":[[["mining.notify","${client.extraNonceAndSessionId}"]],"${client.extraNonceAndSessionId}",0]}\n`, expect.any(Function));
 
     });
 

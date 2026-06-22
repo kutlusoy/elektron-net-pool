@@ -2,7 +2,7 @@ import { Expose, Transform } from 'class-transformer';
 import { IsArray, IsString, MaxLength } from 'class-validator';
 
 import { eRequestMethod } from '../enums/eRequestMethod';
-import { EXTRANONCE1_SIZE_BYTES, EXTRANONCE2_SIZE_BYTES } from '../stratum.constants';
+import { EXTRANONCE2_SIZE_BYTES } from '../stratum.constants';
 import { StratumBaseMessage } from './StratumBaseMessage';
 
 export class SubscriptionMessage extends StratumBaseMessage {
@@ -25,10 +25,15 @@ export class SubscriptionMessage extends StratumBaseMessage {
     }
 
     public response(clientId: string) {
-        // Header-only mining (Elektron Net): we keep `clientId` as the session
-        // tag but it is NOT used as extranonce1 — coinbase is sent through
-        // unchanged. `extranonce1` is emitted as an empty hex string and
-        // `extranonce2_size` is 0 so miners don't try to extend the coinbase.
+        // Header-only mining (Elektron Net): the coinbase must be sent through
+        // unchanged for the per-block UTXO attestation to validate, so we set
+        // `extranonce2_size = 0`. But mainstream ASIC firmware (Bitaxe
+        // ESP-Miner, NerdMiner, BraiinsOS, stock Bitmain) rejects a subscribe
+        // response with an EMPTY extranonce1 and closes the socket — see
+        // stratum.constants.ts for the long version. We therefore send the
+        // per-connection session id (= clientId) as extranonce1; with
+        // extranonce2_size = 0 the firmware is expected to keep it as a
+        // session tag and not splice it into the coinbase.
         return {
             id: this.id,
             error: null,
@@ -36,7 +41,7 @@ export class SubscriptionMessage extends StratumBaseMessage {
                 [
                     ['mining.notify', clientId]
                 ],
-                EXTRANONCE1_SIZE_BYTES === 0 ? '' : clientId,
+                clientId,
                 EXTRANONCE2_SIZE_BYTES
             ]
         }
