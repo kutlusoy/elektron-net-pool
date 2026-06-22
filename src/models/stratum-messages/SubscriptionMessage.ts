@@ -2,7 +2,7 @@ import { Expose, Transform } from 'class-transformer';
 import { IsArray, IsString, MaxLength } from 'class-validator';
 
 import { eRequestMethod } from '../enums/eRequestMethod';
-import { EXTRANONCE1_SIZE_BYTES, EXTRANONCE2_SIZE_BYTES } from '../stratum.constants';
+import { EXTRANONCE2_SIZE_BYTES } from '../stratum.constants';
 import { StratumBaseMessage } from './StratumBaseMessage';
 
 export class SubscriptionMessage extends StratumBaseMessage {
@@ -26,19 +26,14 @@ export class SubscriptionMessage extends StratumBaseMessage {
 
     public response(clientId: string) {
         // Header-only mining (Elektron Net): the coinbase must be sent through
-        // unchanged for the UTXO attestation to validate. We therefore set
-        // `extranonce2_size = 0` so miners do not iterate any bytes into the
-        // coinbase scriptSig.
-        //
-        // We DO send a non-empty `extranonce1` (the per-connection session id)
-        // because many ASIC firmwares (Bitaxe ESP-Miner, NerdMiner, BraiinsOS,
-        // stock Bitmain) reject a subscribe response with an empty extranonce1
-        // — they fail JSON validation client-side and close the TCP socket
-        // immediately, leading to a 1–2 Hz reconnect loop. With size_2 = 0 the
-        // miner builds the coinbase as `coinb1 + extranonce1 + coinb2`. The
-        // pool's `MiningJob` therefore splits the serialized coinbase around
-        // a length-SESSION_ID_SIZE_BYTES hole that gets filled by extranonce1
-        // (see MiningJob.ts).
+        // unchanged for the per-block UTXO attestation to validate, so we set
+        // `extranonce2_size = 0`. But mainstream ASIC firmware (Bitaxe
+        // ESP-Miner, NerdMiner, BraiinsOS, stock Bitmain) rejects a subscribe
+        // response with an EMPTY extranonce1 and closes the socket — see
+        // stratum.constants.ts for the long version. We therefore send the
+        // per-connection session id (= clientId) as extranonce1; with
+        // extranonce2_size = 0 the firmware is expected to keep it as a
+        // session tag and not splice it into the coinbase.
         return {
             id: this.id,
             error: null,
