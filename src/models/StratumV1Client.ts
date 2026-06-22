@@ -329,6 +329,7 @@ export class StratumV1Client {
                 const errors = await validate(miningSubmitMessage, validatorOptions);
 
                 if (errors.length === 0 && this.stratumInitialized == true) {
+                    console.log(`mining.submit <- ${this.extraNonceAndSessionId} job=${miningSubmitMessage.jobId} ntime=${miningSubmitMessage.ntime} nonce=${miningSubmitMessage.nonce} versionMask=${miningSubmitMessage.versionMask}`);
                     const result = await this.handleMiningSubmission(miningSubmitMessage);
                     if (result == true) {
                         const success = await this.write(JSON.stringify(miningSubmitMessage.response()) + '\n');
@@ -384,6 +385,17 @@ export class StratumV1Client {
         switch (this.clientSubscription.userAgent) {
             case 'cpuminer': {
                 this.sessionDifficulty = 0.1;
+                break;
+            }
+            case 'NerdMiner':
+            case 'nerdminer':
+            case 'NerdminerV2': {
+                // ESP32-based CPU miner running at a few tens of kH/s. A
+                // single share at diff=1 takes hours; drop the starting
+                // difficulty so shares actually arrive within the pool's
+                // dead-client timeout window.
+                this.sessionDifficulty = 0.001;
+                break;
             }
         }
 
@@ -486,6 +498,7 @@ export class StratumV1Client {
         if (!success) {
             return;
         }
+        console.log(`mining.notify -> ${this.extraNonceAndSessionId} job=${job.jobId} height=${jobTemplate.blockData.height} diff=${this.sessionDifficulty} clearJobs=${jobTemplate.blockData.clearJobs}`);
         this.lastSentMiningJobTimestamp = jobTemplate.block.timestamp;
 
 
@@ -582,7 +595,7 @@ export class StratumV1Client {
         );
         const { submissionDifficulty } = this.calculateDifficulty(header);
 
-        //console.log(`DIFF: ${submissionDifficulty} of ${this.sessionDifficulty} from ${this.clientAuthorization.worker + '.' + this.extraNonceAndSessionId}`);
+        console.log(`share diff=${submissionDifficulty.toFixed(6)} required=${this.sessionDifficulty} ${submissionDifficulty >= this.sessionDifficulty ? 'OK' : 'LOW'} from ${this.extraNonceAndSessionId}`);
 
 
         if (submissionDifficulty >= this.sessionDifficulty) {
