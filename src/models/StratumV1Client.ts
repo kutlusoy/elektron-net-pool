@@ -593,47 +593,52 @@ export class StratumV1Client {
         );
         const { submissionDifficulty } = this.calculateDifficulty(header);
 
-        // DIAGNOSTIC (remove once the firmware behaviour is understood):
-        // Some hobby firmwares (NerdMiner V2 et al.) splice the wire-level
-        // extranonce1 (and any extranonce2) into the coinbase before
-        // computing the merkle root, even when we advertise extranonce2_size = 0.
-        // The pool's canonical coinbase has no such splice, so the miner's
-        // header hashes against a different merkle root than ours and every
-        // share reads as diff~0. Compute the alternate difficulty under the
-        // splice hypothesis and log it so we can see whether the spliced
-        // header would have validated. If altDiff is consistently >= required
-        // while the canonical diff is ~0, the firmware is doing the classic
-        // splice and the pool cannot validate its shares without breaking
-        // UTXO attestation.
-        let altDiff = 0;
-        let altCanonical = 0;
-        try {
-            const en1 = (this.extraNonceAndSessionId && this.extraNonceAndSessionId.length > 0)
-                ? Buffer.from(this.extraNonceAndSessionId, 'hex')
-                : Buffer.alloc(0);
-            const en2 = (submission.extraNonce2 && submission.extraNonce2.length > 0)
-                ? Buffer.from(submission.extraNonce2, 'hex')
-                : Buffer.alloc(0);
-            const splicedSuffix = Buffer.concat([en1, en2]);
-            const altHeader = job.buildHeaderBufferWithCoinbaseSuffix(
-                jobTemplate, versionMask, nonce, splicedSuffix, timestamp,
+        // DIAGNOSTIC (gated behind DIAGNOSTIC_SHARE_LOGGING env var):
+        // Some hobby firmwares (NerdMiner V2 < 1.8.3 et al.) splice the
+        // wire-level extranonce1 (and any extranonce2) into the coinbase
+        // before computing the merkle root, even when we advertise
+        // extranonce2_size = 0. The pool's canonical coinbase has no such
+        // splice, so the miner's header hashes against a different merkle
+        // root than ours and every share reads as diff~0. Compute the
+        // alternate difficulty under the splice hypothesis and log it so
+        // we can see whether the spliced header would have validated. If
+        // altSpliced is consistently >= required while canonical is ~0,
+        // the firmware is doing the classic splice and the pool cannot
+        // validate its shares without breaking UTXO attestation.
+        // Set DIAGNOSTIC_SHARE_LOGGING=true to enable (very chatty — one
+        // extra log line per share).
+        const diagnosticLoggingEnabled = String(this.configService.get<string>('DIAGNOSTIC_SHARE_LOGGING') ?? '').toLowerCase() === 'true';
+        if (diagnosticLoggingEnabled) {
+            let altDiff = 0;
+            let altCanonical = 0;
+            try {
+                const en1 = (this.extraNonceAndSessionId && this.extraNonceAndSessionId.length > 0)
+                    ? Buffer.from(this.extraNonceAndSessionId, 'hex')
+                    : Buffer.alloc(0);
+                const en2 = (submission.extraNonce2 && submission.extraNonce2.length > 0)
+                    ? Buffer.from(submission.extraNonce2, 'hex')
+                    : Buffer.alloc(0);
+                const splicedSuffix = Buffer.concat([en1, en2]);
+                const altHeader = job.buildHeaderBufferWithCoinbaseSuffix(
+                    jobTemplate, versionMask, nonce, splicedSuffix, timestamp,
+                );
+                altDiff = this.calculateDifficulty(altHeader).submissionDifficulty;
+                // Also probe the "miner used empty extranonces" case as a
+                // sanity baseline — should equal `submissionDifficulty` exactly.
+                const baselineHeader = job.buildHeaderBufferWithCoinbaseSuffix(
+                    jobTemplate, versionMask, nonce, Buffer.alloc(0), timestamp,
+                );
+                altCanonical = this.calculateDifficulty(baselineHeader).submissionDifficulty;
+            } catch (e) {
+                console.log(`  [diag] error computing alt diff: ${(e as Error)?.message}`);
+            }
+            console.log(
+                `  [diag] canonical=${submissionDifficulty.toFixed(8)} ` +
+                `altSpliced=${altDiff.toFixed(8)} ` +
+                `altBaseline=${altCanonical.toFixed(8)} ` +
+                `en1=${this.extraNonceAndSessionId} en2=${submission.extraNonce2 ?? ''}`
             );
-            altDiff = this.calculateDifficulty(altHeader).submissionDifficulty;
-            // Also probe the "miner used empty extranonces" case as a sanity
-            // baseline — should equal `submissionDifficulty` exactly.
-            const baselineHeader = job.buildHeaderBufferWithCoinbaseSuffix(
-                jobTemplate, versionMask, nonce, Buffer.alloc(0), timestamp,
-            );
-            altCanonical = this.calculateDifficulty(baselineHeader).submissionDifficulty;
-        } catch (e) {
-            console.log(`  [diag] error computing alt diff: ${(e as Error)?.message}`);
         }
-        console.log(
-            `  [diag] canonical=${submissionDifficulty.toFixed(8)} ` +
-            `altSpliced=${altDiff.toFixed(8)} ` +
-            `altBaseline=${altCanonical.toFixed(8)} ` +
-            `en1=${this.extraNonceAndSessionId} en2=${submission.extraNonce2 ?? ''}`
-        );
 
         console.log(`share diff=${submissionDifficulty.toFixed(6)} required=${this.sessionDifficulty} ${submissionDifficulty >= this.sessionDifficulty ? 'OK' : 'LOW'} from ${this.extraNonceAndSessionId}`);
 
