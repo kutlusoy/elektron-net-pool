@@ -7,9 +7,12 @@ describe('MiningSubmitMessage', () => {
 
     describe('test message parsing', () => {
 
-        // With EXTRANONCE2_SIZE_BYTES = 0 the worker contributes nothing to
-        // the coinbase. Anything the firmware sends in this slot is
-        // normalised to "" so the validator accepts it.
+        // EXTRANONCE2_SIZE_BYTES = 0 means the pool does not feed
+        // extranonce2 into the canonical coinbase. The parser still records
+        // whatever the firmware sent so that diagnostics
+        // (DIAGNOSTIC_SHARE_LOGGING_MODES) can compare against alternate
+        // header-reconstruction hypotheses (e.g. NerdMiner_v2 hardcoding
+        // "00000001" via utils.cpp:222-226).
         const MINING_SUBMIT_MESSAGE = ' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "", "64b1f10f", "2402812d", "00006000"]}'
 
         const message = plainToInstance(
@@ -32,13 +35,19 @@ describe('MiningSubmitMessage', () => {
             expect(errors).toEqual([]);
         });
 
-        it('should normalise any firmware-supplied extranonce2 to empty', async () => {
+        it('should preserve any firmware-supplied extranonce2 (e.g. NerdMiner "00000001")', async () => {
+            // NerdMiner_v2 v1.8.3 hardcodes extranonce2 = "00000001" when the
+            // pool advertises extranonce2_size = 0 (utils.cpp:222-226 falls
+            // through to the else branch). The pool never uses this value in
+            // its canonical coinbase, but the parser must still surface it so
+            // the diagnostic share-validation modes can detect the firmware
+            // behaviour.
             const submissionWithExtra = plainToInstance(
                 MiningSubmitMessage,
-                JSON.parse(' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "99020000", "64b1f10f", "2402812d", "00006000"]}'),
+                JSON.parse(' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "00000001", "64b1f10f", "2402812d", "00006000"]}'),
             );
 
-            expect(submissionWithExtra.extraNonce2).toEqual('');
+            expect(submissionWithExtra.extraNonce2).toEqual('00000001');
             const errors = await validate(submissionWithExtra);
             expect(errors).toEqual([]);
         });

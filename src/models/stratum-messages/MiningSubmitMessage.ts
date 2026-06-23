@@ -28,14 +28,16 @@ export class MiningSubmitMessage extends StratumBaseMessage {
     public jobId: string;
     @Expose()
     @IsString()
-    @Length(EXTRANONCE2_SIZE_BYTES * 2, EXTRANONCE2_SIZE_BYTES * 2)
     @Transform(({ value, key, obj, type }) => {
-        // miner.py builds no extranonce2; with EXTRANONCE2_SIZE_BYTES = 0
-        // the field exists positionally but contributes 0 bytes. Some
-        // firmwares still send a leftover placeholder — normalise to ""
-        // so the @Length(0,0) validator accepts it.
-        if (EXTRANONCE2_SIZE_BYTES === 0) return '';
-        return obj.params[2];
+        // Pass through whatever the firmware sent in params[2]. With
+        // EXTRANONCE2_SIZE_BYTES = 0 the pool advertised "no extranonce2"
+        // and the field has no role in coinbase construction on our side,
+        // but some firmwares (NerdMiner_v2 utils.cpp:222-226) still inject
+        // a 4-byte placeholder regardless. Capturing the actual value here
+        // makes diagnostics (see DIAGNOSTIC_SHARE_LOGGING_MODES) meaningful
+        // and costs nothing — the pool does not feed extraNonce2 into the
+        // canonical coinbase the way miner.py does not either.
+        return obj.params[2] ?? '';
     })
     public extraNonce2: string;
     @Expose()
