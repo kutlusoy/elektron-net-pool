@@ -214,10 +214,11 @@ describe('StratumV1Client', () => {
 
         await new Promise((r) => setTimeout(r, 1));
 
-        // miner.py-style: extranonce1 = "" (worker never splices into scriptSig),
-        // extranonce2_size = 0. The session-id tag stays in the mining.notify
-        // channel name only.
-        expect(socket.write).toHaveBeenCalledWith(`{"id":1,"error":null,"result":[[["mining.notify","${client.extraNonceAndSessionId}"]],"",0]}\n`, expect.any(Function));
+        // miner.py-style: extranonce2_size = 0 — worker iterates nothing and
+        // cannot splice into scriptSig. The session id is reused as both the
+        // mining.notify channel tag and the wire-level extranonce1 so hobby
+        // firmwares (NerdMiner, Bitaxe) accept the subscribe reply.
+        expect(socket.write).toHaveBeenCalledWith(`{"id":1,"error":null,"result":[[["mining.notify","${client.extraNonceAndSessionId}"]],"${client.extraNonceAndSessionId}",0]}\n`, expect.any(Function));
 
     });
 

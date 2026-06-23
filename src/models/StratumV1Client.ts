@@ -24,7 +24,7 @@ import { ConfigurationMessage } from './stratum-messages/ConfigurationMessage';
 import { MiningSubmitMessage } from './stratum-messages/MiningSubmitMessage';
 import { StratumErrorMessage } from './stratum-messages/StratumErrorMessage';
 import { SubscriptionMessage } from './stratum-messages/SubscriptionMessage';
-import { EXTRANONCE1_SIZE_BYTES } from './stratum.constants';
+import { SUBSCRIBE_SESSION_ID_BYTES } from './stratum.constants';
 import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
@@ -49,6 +49,7 @@ export class StratumV1Client {
     private stratumInitialized = false;
     private usedSuggestedDifficulty = false;
     private sessionDifficulty: number = 100000;
+    private isHobbyMinerSession = false;
 
     private entity: ClientEntity;
     private creatingEntity: Promise<void>;
@@ -116,11 +117,11 @@ export class StratumV1Client {
     }
 
     private getRandomHexString() {
-        // Per-connection session id, emitted as extranonce1 in the subscribe
-        // response so the ASIC firmware accepts the connection. See
-        // stratum.constants.ts for why this has to be non-empty even though
-        // we run header-only mining.
-        const randomBytes = crypto.randomBytes(EXTRANONCE1_SIZE_BYTES);
+        // Per-connection session id, emitted as extranonce1 / notify channel
+        // tag in the subscribe response so the ASIC firmware accepts the
+        // connection. See stratum.constants.ts for why this has to be
+        // non-empty even though we run header-only mining.
+        const randomBytes = crypto.randomBytes(SUBSCRIBE_SESSION_ID_BYTES);
         return randomBytes.toString('hex');
     }
 
@@ -165,7 +166,8 @@ export class StratumV1Client {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService);
                         this.extraNonceAndSessionId = this.getRandomHexString();
-                        console.log(`New client ID: ${this.extraNonceAndSessionId}, userAgent=${subscriptionMessage.userAgent}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
+                        const mode = this.isHobbyMiner(subscriptionMessage.userAgent) ? 'HOBBY' : 'NORMAL';
+                        console.log(`New client ID: ${this.extraNonceAndSessionId}, userAgent=${subscriptionMessage.userAgent}, mode=${mode}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
 
                     this.clientSubscription = subscriptionMessage;
@@ -329,7 +331,7 @@ export class StratumV1Client {
                 const errors = await validate(miningSubmitMessage, validatorOptions);
 
                 if (errors.length === 0 && this.stratumInitialized == true) {
-                    console.log(`mining.submit <- ${this.extraNonceAndSessionId} job=${miningSubmitMessage.jobId} ntime=${miningSubmitMessage.ntime} nonce=${miningSubmitMessage.nonce} versionMask=${miningSubmitMessage.versionMask}`);
+                    console.log(`mining.submit <- ${this.extraNonceAndSessionId} mode=${this.isHobbyMinerSession ? 'HOBBY' : 'NORMAL'} job=${miningSubmitMessage.jobId} ntime=${miningSubmitMessage.ntime} nonce=${miningSubmitMessage.nonce} versionMask=${miningSubmitMessage.versionMask}`);
                     const result = await this.handleMiningSubmission(miningSubmitMessage);
                     if (result == true) {
                         const success = await this.write(JSON.stringify(miningSubmitMessage.response()) + '\n');
@@ -382,21 +384,17 @@ export class StratumV1Client {
             return;
         }
 
-        switch (this.clientSubscription.userAgent) {
-            case 'cpuminer': {
-                this.sessionDifficulty = 0.1;
-                break;
-            }
-            case 'NerdMiner':
-            case 'nerdminer':
-            case 'NerdminerV2': {
-                // ESP32-based CPU miner running at a few tens of kH/s. A
-                // single share at diff=1 takes hours; drop the starting
-                // difficulty so shares actually arrive within the pool's
-                // dead-client timeout window.
-                this.sessionDifficulty = 0.001;
-                break;
-            }
+        if (this.isHobbyMiner(this.clientSubscription.userAgent)) {
+            // ESP32-class hobby miners (NerdMiner, Bitaxe, NerdAxe, ...) run
+            // at a few tens of kH/s. A single share at diff=1 would take
+            // hours; drop the starting difficulty so shares actually arrive
+            // within the pool's dead-client timeout window. Configurable via
+            // HOBBY_MINER_DIFFICULTY env var.
+            const configured = Number(this.configService.get<string>('HOBBY_MINER_DIFFICULTY'));
+            this.sessionDifficulty = Number.isFinite(configured) && configured > 0 ? configured : 0.001;
+            this.isHobbyMinerSession = true;
+        } else if (this.clientSubscription.userAgent === 'cpuminer') {
+            this.sessionDifficulty = 0.1;
         }
 
         if (this.clientSuggestedDifficulty == null) {
@@ -744,6 +742,20 @@ export class StratumV1Client {
         }
 
         return number;
+    }
+
+    private isHobbyMiner(userAgent: string): boolean {
+        // Hobby-miner allow-list (NerdMiner V2, Bitaxe, NerdAxe, NerdQAxe,
+        // ESP-Miner, ...). Substring-matched case-insensitively against the
+        // userAgent reported in mining.subscribe. Configured via the
+        // HOBBY_MINER_USER_AGENTS env var (comma-separated).
+        const list = this.configService.get<string>('HOBBY_MINER_USER_AGENTS');
+        if (!list || list.trim() === '' || !userAgent) {
+            return false;
+        }
+        const needles = list.split(',').map(ua => ua.trim().toLowerCase()).filter(ua => ua.length > 0);
+        const haystack = userAgent.toLowerCase();
+        return needles.some(needle => haystack.includes(needle));
     }
 
     private isBlockedUserAgent(userAgent: string): boolean {

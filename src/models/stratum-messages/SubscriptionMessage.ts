@@ -25,11 +25,15 @@ export class SubscriptionMessage extends StratumBaseMessage {
     }
 
     public response(clientId: string) {
-        // miner.py-equivalent Stratum wiring: extranonce sizes are 0 so the
-        // worker has nothing to splice into the coinbase. `clientId` is the
-        // mining.notify channel tag — kept stable across `mining.set_difficulty`
-        // updates — but it is NOT used as extranonce1 (which would otherwise be
-        // inserted into scriptSig and break the UTXO attestation).
+        // miner.py-equivalent Stratum wiring: EXTRANONCE2_SIZE_BYTES = 0 so the
+        // worker iterates nothing and cannot splice anything into the coinbase.
+        // `clientId` is the mining.notify channel tag — kept stable across
+        // `mining.set_difficulty` updates — AND is reused as the extranonce1
+        // slot on the wire. It must be a non-empty hex string or hobby-miner
+        // firmwares (NerdMiner, Bitaxe, ESP-Miner) reject the subscribe reply
+        // and disconnect. The coinbase the pool actually submits is built from
+        // `coinbase_script_sig_prefix` verbatim (see MiningJob.ts) and never
+        // includes this value, so UTXO attestation is unaffected.
         return {
             id: this.id,
             error: null,
@@ -37,7 +41,7 @@ export class SubscriptionMessage extends StratumBaseMessage {
                 [
                     ['mining.notify', clientId]
                 ],
-                '',
+                clientId,
                 EXTRANONCE2_SIZE_BYTES
             ]
         }

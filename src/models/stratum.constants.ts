@@ -22,3 +22,12 @@
 export const EXTRANONCE1_SIZE_BYTES = 0;
 export const EXTRANONCE2_SIZE_BYTES = 0;
 export const TOTAL_EXTRANONCE_SIZE_BYTES = EXTRANONCE1_SIZE_BYTES + EXTRANONCE2_SIZE_BYTES;
+
+// Session id advertised in the mining.subscribe response (notify channel tag
+// and the "extranonce1" slot on the wire). It must be a non-empty hex string
+// because NerdMiner / Bitaxe firmwares reject the subscribe reply otherwise
+// and disconnect immediately. It is NOT spliced into the coinbase by the
+// worker — EXTRANONCE2_SIZE_BYTES = 0 guarantees the miner iterates nothing,
+// so the coinbase stays byte-identical to mining/miner.py and the UTXO
+// attestation is preserved regardless of what we put here.
+export const SUBSCRIBE_SESSION_ID_BYTES = 4;
