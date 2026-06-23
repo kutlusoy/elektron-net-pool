@@ -26,7 +26,12 @@ describe('SubscriptionMessage', () => {
         expect(message.userAgent).toBe('unknown');
     });
 
-    it('should respond with empty extranonce1 and zero extranonce2_size (miner.py compatible)', () => {
+    it('should respond with the session id as extranonce1 and zero extranonce2_size (miner.py compatible)', () => {
+        // The session id is reused as the wire-level extranonce1 so hobby
+        // firmwares (NerdMiner, Bitaxe) accept the subscribe reply. Coinbase
+        // is unaffected because extranonce2_size = 0 — the worker iterates
+        // nothing and the pool builds the coinbase from
+        // coinbase_script_sig_prefix verbatim. See MiningJob.ts.
         const message = plainToInstance(
             SubscriptionMessage,
             JSON.parse('{"id":1,"method":"mining.subscribe","params":["bitaxe v2.2"]}')
@@ -37,7 +42,7 @@ describe('SubscriptionMessage', () => {
             error: null,
             result: [
                 [['mining.notify', '57a6f098']],
-                '',
+                '57a6f098',
                 0
             ]
         });
