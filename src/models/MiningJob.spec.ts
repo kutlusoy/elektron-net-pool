@@ -60,35 +60,34 @@ describe('MiningJob', () => {
             jest.useRealTimers();
         });
 
-        it('should send the full coinbase as coinb1 with an empty coinb2', () => {
-            // Header-only mining: extranonce size is 0, so the entire coinbase
-            // serialization lives in coinb1 and coinb2 is empty.
+        it('should split coinbase around 8 bytes of extranonce space', () => {
             const notify = JSON.parse(job.response(jobTemplate));
-            const coinbasePart1 = notify.params[2];
-            const coinbasePart2 = notify.params[3];
+            const coinb1 = notify.params[2];
+            const coinb2 = notify.params[3];
+            const extraNonce1 = '57a6f098';
+            const extraNonce2 = 'c7080000';
+            const coinbase = bitcoinjs.Transaction.fromHex(`${coinb1}${extraNonce1}${extraNonce2}${coinb2}`);
 
-            expect(coinbasePart2).toBe('');
-            const coinbase = bitcoinjs.Transaction.fromHex(coinbasePart1);
-            expect(coinbase.ins.length).toBe(1);
-            // scriptSig is just the BIP34 height push from the template
-            expect(coinbase.ins[0].script.length).toBeGreaterThan(0);
+            expect(Buffer.byteLength(extraNonce1 + extraNonce2, 'hex')).toBe(8);
+            expect(coinbase.ins[0].script.toString('hex')).toContain(`${extraNonce1}${extraNonce2}`);
         });
 
-        it('should ignore extranonce arguments when updating the block', () => {
-            const originalCoinbase = job.cloneCoinbaseTransaction();
+        it('should splice extranonce into coinbase scriptSig when assembling a block', () => {
+            const extraNonce1 = '57a6f098';
+            const extraNonce2 = 'c7080000';
             const updatedBlock = job.copyAndUpdateBlock(
                 jobTemplate,
                 parseInt('00002000', 16),
                 parseInt('ed460d91', 16),
-                'deadbeef',
-                'cafebabe00000000',
+                extraNonce1,
+                extraNonce2,
                 parseInt(MockRecording1.TIME, 16)
             );
 
             expect(updatedBlock.nonce).toBe(parseInt('ed460d91', 16));
             expect(updatedBlock.version).toBe(jobTemplate.block.version ^ parseInt('00002000', 16));
-            // Coinbase scriptSig is unchanged — extranonce args are no-ops.
-            expect(updatedBlock.transactions[0].ins[0].script.equals(originalCoinbase.ins[0].script)).toBe(true);
+            const scriptHex = updatedBlock.transactions[0].ins[0].script.toString('hex');
+            expect(scriptHex.endsWith(`${extraNonce1}${extraNonce2}`)).toBe(true);
         });
 
         it('should leave block version unchanged without a version mask', () => {
@@ -96,8 +95,8 @@ describe('MiningJob', () => {
                 jobTemplate,
                 0,
                 parseInt('ed460d91', 16),
-                '',
-                '',
+                '57a6f098',
+                'c7080000',
                 parseInt(MockRecording1.TIME, 16)
             );
 
@@ -107,22 +106,24 @@ describe('MiningJob', () => {
         it('should build the same header as the full block update path', () => {
             const versionMask = parseInt('00002000', 16);
             const nonce = parseInt('ed460d91', 16);
+            const extraNonce1 = '57a6f098';
+            const extraNonce2 = 'c7080000';
             const timestamp = parseInt(MockRecording1.TIME, 16);
 
             const updatedBlock = job.copyAndUpdateBlock(
                 jobTemplate,
                 versionMask,
                 nonce,
-                '',
-                '',
+                extraNonce1,
+                extraNonce2,
                 timestamp
             );
             const fastHeader = job.buildHeaderBuffer(
                 jobTemplate,
                 versionMask,
                 nonce,
-                '',
-                '',
+                extraNonce1,
+                extraNonce2,
                 timestamp
             );
 

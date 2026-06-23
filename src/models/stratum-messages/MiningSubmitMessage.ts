@@ -30,13 +30,7 @@ export class MiningSubmitMessage extends StratumBaseMessage {
     @IsString()
     @Length(EXTRANONCE2_SIZE_BYTES * 2, EXTRANONCE2_SIZE_BYTES * 2)
     @Transform(({ value, key, obj, type }) => {
-        // Header-only mining: extranonce2 size is 0. Most ASIC firmwares still
-        // send a string ("" or "00"); accept both by normalising to "".
-        const raw = obj.params[2];
-        if (EXTRANONCE2_SIZE_BYTES === 0) {
-            return '';
-        }
-        return raw;
+        return obj.params[2];
     })
     public extraNonce2: string;
     @Expose()
@@ -77,10 +71,4 @@ export class MiningSubmitMessage extends StratumBaseMessage {
         const buffer = Buffer.from(this.versionMask + this.nonce + this.extraNonce2 + this.ntime + this.jobId);
         return bitcoinjs.crypto.hash256(buffer).toString('base64');
     }
-
-
-
-
-
-
 }
