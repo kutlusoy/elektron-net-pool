@@ -1,30 +1,27 @@
-// Elektron Net pool integration — by the book.
+// 1:1 mirror of mining/miner.py:_build_coinbase_tx (Elektron Net reference miner).
 //
-// This file mirrors the canonical coinbase construction described in the
-// official integration guide (doc-elektron/mining-pool-integration.md v4.0.1)
-// and matches the reference miners (mining/miner.py, mining/miner.cpp)
-// byte-for-byte. The Elektron node validates the per-block UTXO attestation
-// strictly against a coinbase whose fields are produced exactly the same way.
+// Field-by-field correspondence with the Python source:
 //
-// Cross-reference — every checkbox from the doc's §11 migration checklist:
+//   height       = template['height']                  (jobTemplate.blockData.height)
+//   prefix_hex   = template['coinbase_script_sig_prefix']
+//   script_sig   = bytes.fromhex(prefix_hex)            — NOTHING APPENDED
+//   prevout      = bytes(32) + b'\xff\xff\xff\xff'
+//   nSequence    = 0xFFFFFFFE  (MAX_SEQUENCE_NONFINAL — required for timelock)
+//   vout[0]      = (coinbasevalue, payout scriptPubKey)
+//   vout[1..]    = coinbase_required_outputs verbatim, in template order
+//   nLockTime    = height - 1                          (Elektron consensus)
+//   witness      = single 32-byte zero stack item on vin[0]
 //
-//   [x] vin[0].prevout = 32×00 + 0xffffffff                                (§3.1)
-//   [x] vin[0].scriptSig = coinbase_script_sig_prefix + extranonce          (§3.1, §3.5)
-//   [x] vin[0].nSequence = 0xfffffffe                                       (§3.1)
-//   [x] vout[0] = payout (coinbasevalue → miner address)                    (§3.1)
-//   [x] vout[1] = required_outputs[0] verbatim (UTXO attestation OP_RETURN) (§3.1, §3.2)
-//   [x] vout[2] = required_outputs[1] verbatim (witness commitment)         (§3.1, §3.3)
-//   [x] Output order preserved exactly as GBT delivers                      (§3.1)
-//   [x] nLockTime = height - 1                                              (§3.1)
-//   [x] SegWit witness on vin[0] = single 32-byte zero item                 (§3.1)
-//   [x] Stratum split:  coinb1 + extranonce1 + extranonce2 + coinb2         (§3.5)
-//   [x] Extranonce only inside scriptSig, coinb2 carries required_outputs   (§3.5)
-//   [x] Merkle root recomputed from the final coinbase non-witness txid     (§5.4)
+// The miner.py comment on `script_sig = bytes.fromhex(prefix_hex)` is the
+// reason we cannot append an extranonce placeholder here:
 //
-// The Python reference `_build_coinbase_tx` in `mining/miner.py` is the
-// authoritative byte layout. Anything we emit must be reconstructible by
-// concatenating coinb1 + extranonce1 + extranonce2 + coinb2 and parsing as a
-// standard non-witness Bitcoin transaction.
+//   # Use the exact prefix from getblocktemplate so UTXO attestation matches.
+//
+// Any extra byte in scriptSig changes the coinbase txid; the post-block
+// UTXO set then hashes differently from the value baked into
+// coinbase_required_outputs[0] and the node rejects with
+// bad-utxo-attestation. EXTRANONCE_SIZE = 0 in stratum.constants.ts is
+// what keeps this true on the Stratum wire.
 
 import * as bitcoinjs from 'bitcoinjs-lib';
 
@@ -32,7 +29,6 @@ import { IJobTemplate } from '../services/stratum-v1-jobs.service';
 import { eResponseMethod } from './enums/eResponseMethod';
 import { IMiningNotify } from './stratum-messages/IMiningNotify';
 import { ConfigService } from '@nestjs/config';
-import { TOTAL_EXTRANONCE_SIZE_BYTES } from './stratum.constants';
 
 const MAX_BLOCK_WEIGHT = 4000000;
 
@@ -66,46 +62,48 @@ export class MiningJob {
         this.jobTemplateId = jobTemplate.blockData.id;
         this.merkleBranchBuffers = jobTemplate.merkle_branch.map(branch => Buffer.from(branch, 'hex'));
 
+        // miner.py: height = template['height']
+        const height = jobTemplate.blockData.height;
+
         this.coinbaseTransaction = this.createCoinbaseTransaction(payoutInformation, jobTemplate.blockData.coinbasevalue);
 
-        // Doc §3.1 / miner.py:`struct.pack('<I', height - 1)`
-        // Elektron Net consensus REQUIRES coinbase nLockTime to equal
-        // (block height - 1). Forgetting this produces immediate
-        // `bad-cb-locktime` / consensus failures on submitblock.
-        this.coinbaseTransaction.locktime = jobTemplate.blockData.height - 1;
+        // miner.py: tx += struct.pack('<I', height - 1)  # nLockTime = height - 1
+        this.coinbaseTransaction.locktime = height - 1;
 
-        // scriptSig layout:  <BIP34 height push>  <extranonce hole>
-        //                     ^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^
-        //                     coinbase_script_     filled by miner
-        //                     sig_prefix from      with extranonce1 +
-        //                     GBT                  extranonce2
-        // The hole is zero-padded at template time; the actual extranonce
-        // bytes get spliced in by the worker per Stratum spec.
-        let scriptSigPrefix: Buffer;
+        // miner.py:
+        //   prefix_hex = template.get('coinbase_script_sig_prefix')
+        //   if prefix_hex:
+        //       script_sig = bytes.fromhex(prefix_hex)
+        //   else:
+        //       script_sig = _script_num(height)
+        //       if len(script_sig) < 2: script_sig += bytes([0x00])
+        //
+        // No extranonce, no padding. The comment in miner.py is exact:
+        //   # Use the exact prefix from getblocktemplate so UTXO attestation matches.
+        let scriptSig: Buffer;
         if (jobTemplate.coinbase_script_sig_prefix && jobTemplate.coinbase_script_sig_prefix.length > 0) {
-            scriptSigPrefix = jobTemplate.coinbase_script_sig_prefix;
+            scriptSig = jobTemplate.coinbase_script_sig_prefix;
         } else {
-            const heightEncoded = bitcoinjs.script.number.encode(jobTemplate.blockData.height);
+            const heightEncoded = bitcoinjs.script.number.encode(height);
             const heightLengthByte = Buffer.from([heightEncoded.length]);
-            scriptSigPrefix = Buffer.concat([heightLengthByte, heightEncoded]);
+            scriptSig = Buffer.concat([heightLengthByte, heightEncoded]);
+            if (scriptSig.length < 2) {
+                scriptSig = Buffer.concat([scriptSig, Buffer.from([0x00])]); // OP_0 — bad-cb-length guard
+            }
         }
+        this.coinbaseTransaction.ins[0].script = scriptSig;
 
-        const extranoncePlaceholder = Buffer.alloc(TOTAL_EXTRANONCE_SIZE_BYTES, 0);
-        this.coinbaseTransaction.ins[0].script = Buffer.concat([scriptSigPrefix, extranoncePlaceholder]);
-
-        // Outputs:
-        //   vout[0]  payout
-        //   vout[1]  required_outputs[0]  (UTXO attestation OP_RETURN)
-        //   vout[2]  required_outputs[1]  (witness commitment OP_RETURN)
-        // Order MUST match the array order from GBT — the node uses content
-        // matching to identify the attestation but Merkle reconstruction
-        // depends on a stable layout.
+        // miner.py:
+        //   outputs = vout[0] payout, then each entry of coinbase_required_outputs in order.
+        //   vout[0] already added in createCoinbaseTransaction; here we append the required_outputs.
         const requiredOutputs = jobTemplate.coinbase_required_outputs ?? [];
         if (requiredOutputs.length > 0) {
             for (const out of requiredOutputs) {
                 this.coinbaseTransaction.addOutput(out.scriptPubKey, out.value);
             }
         } else if (jobTemplate.block.witnessCommit) {
+            // miner.py fallback: if no required_outputs, build the witness commitment
+            // from default_witness_commitment.
             const segwitMagic = Buffer.from('aa21a9ed', 'hex');
             this.coinbaseTransaction.addOutput(
                 bitcoinjs.script.compile([bitcoinjs.opcodes.OP_RETURN, Buffer.concat([segwitMagic, jobTemplate.block.witnessCommit])]),
@@ -117,44 +115,27 @@ export class MiningJob {
             throw new Error('Block weight exceeds the maximum allowed weight');
         }
 
-        // Split serialized coinbase around the extranonce hole so the miner's
-        // bytes land exactly in scriptSig:
+        // Stratum wire layout when EXTRANONCE_SIZE = 0 on both sides:
         //
-        //   coinb1 = serialized prefix up to (and including) <BIP34 height push>
-        //   <extranonce1 + extranonce2>                       (filled by miner)
-        //   coinb2 = rest of scriptSig + sequence + outputs + locktime
+        //   coinbase = coinb1 + "" + "" + ""
         //
-        // Find the placeholder position in the serialized non-witness tx.
-        // @ts-ignore — bitcoinjs's __toBuffer skips witness serialization, which
-        // is what we want here (txid is computed over non-witness bytes).
-        const serializedCoinbaseTx: string = this.coinbaseTransaction.__toBuffer().toString('hex');
-        const fullScriptHex = this.coinbaseTransaction.ins[0].script.toString('hex');
-        const scriptStart = serializedCoinbaseTx.indexOf(fullScriptHex);
-        if (scriptStart < 0) {
-            throw new Error('Failed to locate coinbase scriptSig in serialized tx');
-        }
-        // Where the extranonce hole begins inside the serialized tx.
-        const holeStart = scriptStart + scriptSigPrefix.length * 2;
-        const holeEnd = holeStart + TOTAL_EXTRANONCE_SIZE_BYTES * 2;
-
-        this.coinbasePart1 = serializedCoinbaseTx.slice(0, holeStart);
-        this.coinbasePart2 = serializedCoinbaseTx.slice(holeEnd);
+        // i.e. coinb1 = the canonical non-witness coinbase, coinb2 = empty.
+        // This is bit-identical to miner.py's `tx_no_witness` output.
+        //@ts-ignore — __toBuffer() skips the witness section.
+        this.coinbasePart1 = this.coinbaseTransaction.__toBuffer().toString('hex');
+        this.coinbasePart2 = '';
         this.coinbasePart1Buffer = Buffer.from(this.coinbasePart1, 'hex');
-        this.coinbasePart2Buffer = Buffer.from(this.coinbasePart2, 'hex');
+        this.coinbasePart2Buffer = Buffer.alloc(0);
     }
 
     public cloneCoinbaseTransaction(): bitcoinjs.Transaction {
         return bitcoinjs.Transaction.fromBuffer(this.coinbaseTransaction.toBuffer());
     }
 
-    public buildHeaderBuffer(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): Buffer {
-        // Hash the EXACT bytes the miner used: coinb1 + extranonce1 + extranonce2 + coinb2.
-        const coinbaseBuffer = Buffer.concat([
-            this.coinbasePart1Buffer,
-            Buffer.from(`${extraNonce}${extraNonce2}`, 'hex'),
-            this.coinbasePart2Buffer,
-        ]);
-        const coinbaseHash = bitcoinjs.crypto.hash256(coinbaseBuffer);
+    public buildHeaderBuffer(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): Buffer {
+        // With EXTRANONCE_SIZE = 0 the worker can't change the coinbase, so the
+        // hash is precisely the precomputed coinbasePart1Buffer (=tx_no_witness).
+        const coinbaseHash = bitcoinjs.crypto.hash256(this.coinbasePart1Buffer);
         const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, this.merkleBranchBuffers);
 
         let version = jobTemplate.block.version;
@@ -173,32 +154,24 @@ export class MiningJob {
         return header;
     }
 
-    public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): bitcoinjs.Block {
+    public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);
         testBlock.transactions = jobTemplate.block.transactions.map(tx => {
             return Object.assign(new bitcoinjs.Transaction(), tx);
         });
 
-        // Splice the miner's extranonce bytes into the coinbase scriptSig
-        // exactly where the placeholder was. Result is the canonical, valid
-        // coinbase the miner POW'd against — this is what we submit.
-        const coinbase = this.cloneCoinbaseTransaction();
-        const placeholderScript = coinbase.ins[0].script;
-        const replacedScriptHex =
-            placeholderScript
-                .toString('hex')
-                .slice(0, placeholderScript.length * 2 - TOTAL_EXTRANONCE_SIZE_BYTES * 2)
-            + extraNonce + extraNonce2;
-        coinbase.ins[0].script = Buffer.from(replacedScriptHex, 'hex');
-        testBlock.transactions[0] = coinbase;
+        // Coinbase is the canonical miner.py-style tx — scriptSig untouched,
+        // locktime baked in, required_outputs in template order. We submit it
+        // verbatim, which is what miner.py does too.
+        testBlock.transactions[0] = this.cloneCoinbaseTransaction();
 
         testBlock.nonce = nonce;
         if (versionMask !== undefined && versionMask != 0) {
             testBlock.version = (testBlock.version ^ versionMask);
         }
 
-        testBlock.merkleRoot = this.calculateMerkleRootHash(coinbase.getHash(false), this.merkleBranchBuffers);
+        testBlock.merkleRoot = this.calculateMerkleRootHash(testBlock.transactions[0].getHash(false), this.merkleBranchBuffers);
         testBlock.timestamp = timestamp;
 
         return testBlock;
@@ -222,17 +195,20 @@ export class MiningJob {
 
 
     private createCoinbaseTransaction(addresses: AddressObject[], reward: number): bitcoinjs.Transaction {
-        // Mirrors `_build_coinbase_tx` in mining/miner.py:
-        //   tx.version = 2
-        //   vin[0]: prevout = 32×00 || 0xffffffff, nSequence = 0xfffffffe
-        //   vout[0]: payout (full coinbasevalue → miner script)
-        //   coinbase witness stack = single 32-byte zero (BIP141 reserved value)
+        // miner.py:
+        //   tx = struct.pack('<i', 2)                       # version 2
+        //   inputs = bytes(32) + struct.pack('<I', 0xFFFFFFFF)
+        //          + scriptSig_with_compactsize
+        //          + struct.pack('<I', 0xFFFFFFFE)          # nSequence
+        //   outputs = struct.pack('<Q', coinbasevalue)
+        //           + scriptPubKey_with_compactsize         # vout[0] payout
+        //   coinbase witness = single 32-byte zero item     # BIP141 reserved
         const coinbaseTransaction = new bitcoinjs.Transaction();
         coinbaseTransaction.version = 2;
         coinbaseTransaction.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xfffffffe);
 
-        // Single payout: doc §5.5 explicitly forbids dev/pool-fee splits
-        // because the UTXO attestation is pinned to a single payout output.
+        // Single payout: doc §5.5 forbids dev/pool-fee splits — attestation is
+        // pinned to a single payout output.
         let rewardBalance = reward;
         addresses.forEach(recipientAddress => {
             const amount = Math.floor((recipientAddress.percent / 100) * reward);
