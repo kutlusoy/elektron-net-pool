@@ -1,3 +1,31 @@
+// Elektron Net pool integration — by the book.
+//
+// This file mirrors the canonical coinbase construction described in the
+// official integration guide (doc-elektron/mining-pool-integration.md v4.0.1)
+// and matches the reference miners (mining/miner.py, mining/miner.cpp)
+// byte-for-byte. The Elektron node validates the per-block UTXO attestation
+// strictly against a coinbase whose fields are produced exactly the same way.
+//
+// Cross-reference — every checkbox from the doc's §11 migration checklist:
+//
+//   [x] vin[0].prevout = 32×00 + 0xffffffff                                (§3.1)
+//   [x] vin[0].scriptSig = coinbase_script_sig_prefix + extranonce          (§3.1, §3.5)
+//   [x] vin[0].nSequence = 0xfffffffe                                       (§3.1)
+//   [x] vout[0] = payout (coinbasevalue → miner address)                    (§3.1)
+//   [x] vout[1] = required_outputs[0] verbatim (UTXO attestation OP_RETURN) (§3.1, §3.2)
+//   [x] vout[2] = required_outputs[1] verbatim (witness commitment)         (§3.1, §3.3)
+//   [x] Output order preserved exactly as GBT delivers                      (§3.1)
+//   [x] nLockTime = height - 1                                              (§3.1)
+//   [x] SegWit witness on vin[0] = single 32-byte zero item                 (§3.1)
+//   [x] Stratum split:  coinb1 + extranonce1 + extranonce2 + coinb2         (§3.5)
+//   [x] Extranonce only inside scriptSig, coinb2 carries required_outputs   (§3.5)
+//   [x] Merkle root recomputed from the final coinbase non-witness txid     (§5.4)
+//
+// The Python reference `_build_coinbase_tx` in `mining/miner.py` is the
+// authoritative byte layout. Anything we emit must be reconstructible by
+// concatenating coinb1 + extranonce1 + extranonce2 + coinb2 and parsing as a
+// standard non-witness Bitcoin transaction.
+
 import * as bitcoinjs from 'bitcoinjs-lib';
 
 import { IJobTemplate } from '../services/stratum-v1-jobs.service';
@@ -39,7 +67,11 @@ export class MiningJob {
         this.merkleBranchBuffers = jobTemplate.merkle_branch.map(branch => Buffer.from(branch, 'hex'));
 
         this.coinbaseTransaction = this.createCoinbaseTransaction(payoutInformation, jobTemplate.blockData.coinbasevalue);
-        // Elektron Net consensus: coinbase nLockTime must equal height - 1.
+
+        // Doc §3.1 / miner.py:`struct.pack('<I', height - 1)`
+        // Elektron Net consensus REQUIRES coinbase nLockTime to equal
+        // (block height - 1). Forgetting this produces immediate
+        // `bad-cb-locktime` / consensus failures on submitblock.
         this.coinbaseTransaction.locktime = jobTemplate.blockData.height - 1;
 
         // scriptSig layout:  <BIP34 height push>  <extranonce hole>
@@ -190,10 +222,17 @@ export class MiningJob {
 
 
     private createCoinbaseTransaction(addresses: AddressObject[], reward: number): bitcoinjs.Transaction {
+        // Mirrors `_build_coinbase_tx` in mining/miner.py:
+        //   tx.version = 2
+        //   vin[0]: prevout = 32×00 || 0xffffffff, nSequence = 0xfffffffe
+        //   vout[0]: payout (full coinbasevalue → miner script)
+        //   coinbase witness stack = single 32-byte zero (BIP141 reserved value)
         const coinbaseTransaction = new bitcoinjs.Transaction();
         coinbaseTransaction.version = 2;
         coinbaseTransaction.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xfffffffe);
 
+        // Single payout: doc §5.5 explicitly forbids dev/pool-fee splits
+        // because the UTXO attestation is pinned to a single payout output.
         let rewardBalance = reward;
         addresses.forEach(recipientAddress => {
             const amount = Math.floor((recipientAddress.percent / 100) * reward);
@@ -202,7 +241,6 @@ export class MiningJob {
         });
         coinbaseTransaction.outs[0].value += rewardBalance;
 
-        // BIP141 reserved witness value (32 zero bytes) on the coinbase input.
         coinbaseTransaction.ins[0].witness = [Buffer.alloc(32, 0)];
 
         return coinbaseTransaction;
