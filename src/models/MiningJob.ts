@@ -4,12 +4,15 @@ import { IJobTemplate } from '../services/stratum-v1-jobs.service';
 import { eResponseMethod } from './enums/eResponseMethod';
 import { IMiningNotify } from './stratum-messages/IMiningNotify';
 import { ConfigService } from '@nestjs/config';
+import { TOTAL_EXTRANONCE_SIZE_BYTES } from './stratum.constants';
 
 const MAX_BLOCK_WEIGHT = 4000000;
+
 interface AddressObject {
     address: string;
     percent: number;
 }
+
 export class MiningJob {
 
     private coinbaseTransaction: bitcoinjs.Transaction;
@@ -36,40 +39,44 @@ export class MiningJob {
         this.merkleBranchBuffers = jobTemplate.merkle_branch.map(branch => Buffer.from(branch, 'hex'));
 
         this.coinbaseTransaction = this.createCoinbaseTransaction(payoutInformation, jobTemplate.blockData.coinbasevalue);
-        // Elektron Net consensus: coinbase nLockTime must equal height - 1 (see
-        // doc-elektron/mining-pool-integration.md §9 and src/node/miner.cpp:198).
+        // Elektron Net consensus: coinbase nLockTime must equal height - 1.
         this.coinbaseTransaction.locktime = jobTemplate.blockData.height - 1;
 
-        // Elektron Net: the UTXO attestation in the GBT template is bound to a
-        // coinbase whose scriptSig is exactly the node-supplied prefix (BIP34
-        // height push). Any extra bytes — pool identifier, extranonce padding
-        // — would change the coinbase txid and break the attestation. So this
-        // is the FULL scriptSig; workers vary only header bits.
-        let blockHeightPrefix: Buffer;
+        // scriptSig layout:  <BIP34 height push>  <extranonce hole>
+        //                     ^^^^^^^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^
+        //                     coinbase_script_     filled by miner
+        //                     sig_prefix from      with extranonce1 +
+        //                     GBT                  extranonce2
+        // The hole is zero-padded at template time; the actual extranonce
+        // bytes get spliced in by the worker per Stratum spec.
+        let scriptSigPrefix: Buffer;
         if (jobTemplate.coinbase_script_sig_prefix && jobTemplate.coinbase_script_sig_prefix.length > 0) {
-            blockHeightPrefix = jobTemplate.coinbase_script_sig_prefix;
+            scriptSigPrefix = jobTemplate.coinbase_script_sig_prefix;
         } else {
-            const blockHeightEncoded = bitcoinjs.script.number.encode(jobTemplate.blockData.height);
-            const blockHeightLengthByte = Buffer.from([blockHeightEncoded.length]);
-            blockHeightPrefix = Buffer.concat([blockHeightLengthByte, blockHeightEncoded]);
+            const heightEncoded = bitcoinjs.script.number.encode(jobTemplate.blockData.height);
+            const heightLengthByte = Buffer.from([heightEncoded.length]);
+            scriptSigPrefix = Buffer.concat([heightLengthByte, heightEncoded]);
         }
 
-        this.coinbaseTransaction.ins[0].script = blockHeightPrefix;
+        const extranoncePlaceholder = Buffer.alloc(TOTAL_EXTRANONCE_SIZE_BYTES, 0);
+        this.coinbaseTransaction.ins[0].script = Buffer.concat([scriptSigPrefix, extranoncePlaceholder]);
 
-        // Elektron Net: append all `coinbase_required_outputs` from GBT verbatim, in order.
-        //   [0] = UTXO attestation (OP_RETURN <height> <32-byte UTXO hash>)
-        //   [1] = witness commitment (OP_RETURN 0x24 0xaa21a9ed <32-byte commitment>)
-        // Fallback for legacy/Bitcoin templates that did not provide required outputs:
-        // build the witness commitment from block.witnessCommit (Bitcoin-compatible path).
+        // Outputs:
+        //   vout[0]  payout
+        //   vout[1]  required_outputs[0]  (UTXO attestation OP_RETURN)
+        //   vout[2]  required_outputs[1]  (witness commitment OP_RETURN)
+        // Order MUST match the array order from GBT — the node uses content
+        // matching to identify the attestation but Merkle reconstruction
+        // depends on a stable layout.
         const requiredOutputs = jobTemplate.coinbase_required_outputs ?? [];
         if (requiredOutputs.length > 0) {
             for (const out of requiredOutputs) {
                 this.coinbaseTransaction.addOutput(out.scriptPubKey, out.value);
             }
         } else if (jobTemplate.block.witnessCommit) {
-            const segwitMagicBits = Buffer.from('aa21a9ed', 'hex');
+            const segwitMagic = Buffer.from('aa21a9ed', 'hex');
             this.coinbaseTransaction.addOutput(
-                bitcoinjs.script.compile([bitcoinjs.opcodes.OP_RETURN, Buffer.concat([segwitMagicBits, jobTemplate.block.witnessCommit])]),
+                bitcoinjs.script.compile([bitcoinjs.opcodes.OP_RETURN, Buffer.concat([segwitMagic, jobTemplate.block.witnessCommit])]),
                 0,
             );
         }
@@ -78,23 +85,44 @@ export class MiningJob {
             throw new Error('Block weight exceeds the maximum allowed weight');
         }
 
-        // Coinbase is not split (extranonce size = 0); the entire serialized
-        // tx is sent as coinb1 with an empty coinb2 so the miner can't insert
-        // bytes that would shift the txid.
-        //@ts-ignore
-        this.coinbasePart1 = this.coinbaseTransaction.__toBuffer().toString('hex');
-        this.coinbasePart2 = '';
+        // Split serialized coinbase around the extranonce hole so the miner's
+        // bytes land exactly in scriptSig:
+        //
+        //   coinb1 = serialized prefix up to (and including) <BIP34 height push>
+        //   <extranonce1 + extranonce2>                       (filled by miner)
+        //   coinb2 = rest of scriptSig + sequence + outputs + locktime
+        //
+        // Find the placeholder position in the serialized non-witness tx.
+        // @ts-ignore — bitcoinjs's __toBuffer skips witness serialization, which
+        // is what we want here (txid is computed over non-witness bytes).
+        const serializedCoinbaseTx: string = this.coinbaseTransaction.__toBuffer().toString('hex');
+        const fullScriptHex = this.coinbaseTransaction.ins[0].script.toString('hex');
+        const scriptStart = serializedCoinbaseTx.indexOf(fullScriptHex);
+        if (scriptStart < 0) {
+            throw new Error('Failed to locate coinbase scriptSig in serialized tx');
+        }
+        // Where the extranonce hole begins inside the serialized tx.
+        const holeStart = scriptStart + scriptSigPrefix.length * 2;
+        const holeEnd = holeStart + TOTAL_EXTRANONCE_SIZE_BYTES * 2;
+
+        this.coinbasePart1 = serializedCoinbaseTx.slice(0, holeStart);
+        this.coinbasePart2 = serializedCoinbaseTx.slice(holeEnd);
         this.coinbasePart1Buffer = Buffer.from(this.coinbasePart1, 'hex');
-        this.coinbasePart2Buffer = Buffer.alloc(0);
+        this.coinbasePart2Buffer = Buffer.from(this.coinbasePart2, 'hex');
     }
 
     public cloneCoinbaseTransaction(): bitcoinjs.Transaction {
         return bitcoinjs.Transaction.fromBuffer(this.coinbaseTransaction.toBuffer());
     }
 
-    public buildHeaderBuffer(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): Buffer {
-        // Coinbase is fixed (no extranonce); just hash coinbasePart1Buffer directly.
-        const coinbaseHash = bitcoinjs.crypto.hash256(this.coinbasePart1Buffer);
+    public buildHeaderBuffer(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): Buffer {
+        // Hash the EXACT bytes the miner used: coinb1 + extranonce1 + extranonce2 + coinb2.
+        const coinbaseBuffer = Buffer.concat([
+            this.coinbasePart1Buffer,
+            Buffer.from(`${extraNonce}${extraNonce2}`, 'hex'),
+            this.coinbasePart2Buffer,
+        ]);
+        const coinbaseHash = bitcoinjs.crypto.hash256(coinbaseBuffer);
         const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, this.merkleBranchBuffers);
 
         let version = jobTemplate.block.version;
@@ -113,25 +141,32 @@ export class MiningJob {
         return header;
     }
 
-    public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): bitcoinjs.Block {
+    public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, extraNonce: string, extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);
         testBlock.transactions = jobTemplate.block.transactions.map(tx => {
             return Object.assign(new bitcoinjs.Transaction(), tx);
         });
 
-        // Coinbase is taken verbatim — no scriptSig mutation. Merkle root only
-        // needs recomputation because the placeholder coinbase from the template
-        // had a different shape; the actual coinbase here is our payout one.
-        testBlock.transactions[0] = this.cloneCoinbaseTransaction();
+        // Splice the miner's extranonce bytes into the coinbase scriptSig
+        // exactly where the placeholder was. Result is the canonical, valid
+        // coinbase the miner POW'd against — this is what we submit.
+        const coinbase = this.cloneCoinbaseTransaction();
+        const placeholderScript = coinbase.ins[0].script;
+        const replacedScriptHex =
+            placeholderScript
+                .toString('hex')
+                .slice(0, placeholderScript.length * 2 - TOTAL_EXTRANONCE_SIZE_BYTES * 2)
+            + extraNonce + extraNonce2;
+        coinbase.ins[0].script = Buffer.from(replacedScriptHex, 'hex');
+        testBlock.transactions[0] = coinbase;
 
         testBlock.nonce = nonce;
-
         if (versionMask !== undefined && versionMask != 0) {
             testBlock.version = (testBlock.version ^ versionMask);
         }
 
-        testBlock.merkleRoot = this.calculateMerkleRootHash(testBlock.transactions[0].getHash(false), this.merkleBranchBuffers);
+        testBlock.merkleRoot = this.calculateMerkleRootHash(coinbase.getHash(false), this.merkleBranchBuffers);
         testBlock.timestamp = timestamp;
 
         return testBlock;
@@ -155,39 +190,25 @@ export class MiningJob {
 
 
     private createCoinbaseTransaction(addresses: AddressObject[], reward: number): bitcoinjs.Transaction {
-        // Part 1
         const coinbaseTransaction = new bitcoinjs.Transaction();
-
-        // Set the version of the transaction
         coinbaseTransaction.version = 2;
+        coinbaseTransaction.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xfffffffe);
 
-        // Add the coinbase input (input with no previous output)
-        coinbaseTransaction.addInput(Buffer.alloc(32, 0), 0xffffffff, 0xffffffff);
-
-        // Add an output
         let rewardBalance = reward;
-
         addresses.forEach(recipientAddress => {
             const amount = Math.floor((recipientAddress.percent / 100) * reward);
             rewardBalance -= amount;
             coinbaseTransaction.addOutput(this.getPaymentScript(recipientAddress.address), amount);
-        })
-
-        //Add any remaining sats from the Math.floor
+        });
         coinbaseTransaction.outs[0].value += rewardBalance;
 
-        const segwitWitnessReservedValue = Buffer.alloc(32, 0);
-
-        //and the coinbase's input's witness must consist of a single 32-byte array for the witness reserved value
-        coinbaseTransaction.ins[0].witness = [segwitWitnessReservedValue];
+        // BIP141 reserved witness value (32 zero bytes) on the coinbase input.
+        coinbaseTransaction.ins[0].witness = [Buffer.alloc(32, 0)];
 
         return coinbaseTransaction;
     }
 
     private getPaymentScript(address: string): Buffer {
-        // bitcoinjs.address.toOutputScript handles P2PKH, P2SH, P2WPKH, P2WSH and P2TR.
-        // It uses the bech32 HRP from `this.network`, so Elektron `be1q…` addresses are
-        // accepted automatically when the elektronMainnet Network object is supplied.
         try {
             return bitcoinjs.address.toOutputScript(address, this.network);
         } catch (e) {

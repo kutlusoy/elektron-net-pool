@@ -7,9 +7,8 @@ describe('MiningSubmitMessage', () => {
 
     describe('test message parsing', () => {
 
-        // Header-only mining: extranonce2 is empty (size 0). ASIC firmware
-        // commonly still includes the param positionally — accept "" or "00".
-        const MINING_SUBMIT_MESSAGE = ' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "", "64b1f10f", "2402812d", "00006000"]}'
+        // 4-byte (8 hex char) extranonce2 per EXTRANONCE2_SIZE_BYTES.
+        const MINING_SUBMIT_MESSAGE = ' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "99020000", "64b1f10f", "2402812d", "00006000"]}'
 
         const message = plainToInstance(
             MiningSubmitMessage,
@@ -20,28 +19,38 @@ describe('MiningSubmitMessage', () => {
             expect(message.id).toEqual(5);
             expect(message.userId).toEqual('tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3');
             expect(message.jobId).toEqual('1');
-            expect(message.extraNonce2).toEqual('');
+            expect(message.extraNonce2).toEqual('99020000');
             expect(message.ntime).toEqual('64b1f10f');
             expect(message.nonce).toEqual('2402812d');
             expect(message.versionMask).toEqual('00006000');
         });
 
-        it('should validate empty extranonce2 submissions (header-only mining)', async () => {
+        it('should validate 4-byte extranonce2 submissions', async () => {
             const errors = await validate(message);
 
             expect(errors).toEqual([]);
         });
 
-        it('should normalise any extranonce2 to empty string', async () => {
-            const submissionWithExtra = plainToInstance(
+        it('should reject short extranonce2 submissions', async () => {
+            const shortMessage = plainToInstance(
                 MiningSubmitMessage,
-                JSON.parse(' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "99020000", "64b1f10f", "2402812d", "00006000"]}'),
+                JSON.parse(' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "9902", "64b1f10f", "2402812d", "00006000"]}'),
             );
 
-            // Pool ignores any bytes the miner tries to add to the coinbase.
-            expect(submissionWithExtra.extraNonce2).toEqual('');
-            const errors = await validate(submissionWithExtra);
-            expect(errors).toEqual([]);
+            const errors = await validate(shortMessage);
+
+            expect(errors.some(error => error.property === 'extraNonce2')).toBe(true);
+        });
+
+        it('should reject long extranonce2 submissions', async () => {
+            const longMessage = plainToInstance(
+                MiningSubmitMessage,
+                JSON.parse(' {"id": 5, "method": "mining.submit", "params": ["tb1qumezefzdeqqwn5zfvgdrhxjzc5ylr39uhuxcz4.bitaxe3", "1", "9902000000000000", "64b1f10f", "2402812d", "00006000"]}'),
+            );
+
+            const errors = await validate(longMessage);
+
+            expect(errors.some(error => error.property === 'extraNonce2')).toBe(true);
         });
     });
 
