@@ -24,16 +24,28 @@ export class SubscriptionMessage extends StratumBaseMessage {
         this.method = eRequestMethod.SUBSCRIBE;
     }
 
-    public response(clientId: string) {
+    public response(clientId: string, hobbyMode: boolean = false) {
         // miner.py-equivalent Stratum wiring: EXTRANONCE2_SIZE_BYTES = 0 so the
         // worker iterates nothing and cannot splice anything into the coinbase.
-        // `clientId` is the mining.notify channel tag — kept stable across
-        // `mining.set_difficulty` updates — AND is reused as the extranonce1
-        // slot on the wire. It must be a non-empty hex string or hobby-miner
-        // firmwares (NerdMiner, Bitaxe, ESP-Miner) reject the subscribe reply
-        // and disconnect. The coinbase the pool actually submits is built from
-        // `coinbase_script_sig_prefix` verbatim (see MiningJob.ts) and never
-        // includes this value, so UTXO attestation is unaffected.
+        //
+        // The `extranonce1` slot on the wire is mode-dependent:
+        //
+        // - hobbyMode = false (default, compliant Stratum miners — Bitaxe with
+        //   ESP-Miner, Antminer, Whatsminer, etc.): send empty string. These
+        //   firmwares compute coinbase = coinb1 + "" + "" + coinb2 = canonical,
+        //   so the merkle root matches the pool's and shares validate cleanly.
+        //
+        // - hobbyMode = true (NerdMiner_v2 family): send `clientId` as a
+        //   non-empty extranonce1 so the firmware does not abort the session
+        //   (NerdMiner aborts on empty extranonce1, see stratum.cpp:78-83 in
+        //   BitMaker-hub/NerdMiner_v2). The firmware then splices this
+        //   extranonce1 (plus a hardcoded "00000001" extranonce2 from
+        //   utils.cpp:216-226) into its coinbase, so the resulting merkle root
+        //   diverges from the pool's canonical. The connection stays up but
+        //   shares cannot be validated — until the firmware is patched.
+        //
+        // In both modes `clientId` is used as the mining.notify channel tag.
+        const extranonce1 = hobbyMode ? clientId : '';
         return {
             id: this.id,
             error: null,
@@ -41,7 +53,7 @@ export class SubscriptionMessage extends StratumBaseMessage {
                 [
                     ['mining.notify', clientId]
                 ],
-                clientId,
+                extranonce1,
                 EXTRANONCE2_SIZE_BYTES
             ]
         }
