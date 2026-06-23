@@ -172,7 +172,59 @@ export class MiningJob {
         const splicedCoinbase = coinbaseSuffix.length > 0
             ? Buffer.concat([this.coinbasePart1Buffer, coinbaseSuffix])
             : this.coinbasePart1Buffer;
-        const coinbaseHash = bitcoinjs.crypto.hash256(splicedCoinbase);
+        return this.assembleHeader(jobTemplate, versionMask, nonce, splicedCoinbase, timestamp);
+    }
+
+    /**
+     * Diagnostic only. Mirror of `buildHeaderBufferWithCoinbaseSuffix` but
+     * prepends `coinbasePrefix` to the canonical coinbase before hashing
+     * (covers firmwares that splice at the wrong position).
+     */
+    public buildHeaderBufferWithCoinbasePrefix(
+        jobTemplate: IJobTemplate,
+        versionMask: number,
+        nonce: number,
+        coinbasePrefix: Buffer,
+        timestamp: number,
+    ): Buffer {
+        const splicedCoinbase = coinbasePrefix.length > 0
+            ? Buffer.concat([coinbasePrefix, this.coinbasePart1Buffer])
+            : this.coinbasePart1Buffer;
+        return this.assembleHeader(jobTemplate, versionMask, nonce, splicedCoinbase, timestamp);
+    }
+
+    /**
+     * Diagnostic only. Reproduces the BIP-style Stratum splice: append
+     * `extraBytes` to the END of vin[0].scriptSig (so the scriptSig length
+     * byte changes too), then re-serialize the coinbase. This is what
+     * spec-compliant Stratum v1 firmwares do with extranonce1+extranonce2.
+     * Useful to verify whether a firmware is doing the classical splice
+     * at the right position inside the tx rather than just appending bytes
+     * past the end of the tx.
+     */
+    public buildHeaderBufferWithScriptSigSplice(
+        jobTemplate: IJobTemplate,
+        versionMask: number,
+        nonce: number,
+        extraBytes: Buffer,
+        timestamp: number,
+    ): Buffer {
+        // Clone the coinbase tx, append extraBytes to scriptSig, re-encode.
+        const cloned = bitcoinjs.Transaction.fromBuffer(this.coinbaseTransaction.toBuffer());
+        cloned.ins[0].script = Buffer.concat([cloned.ins[0].script, extraBytes]);
+        //@ts-ignore — __toBuffer() skips the witness section, matching tx_no_witness.
+        const splicedCoinbase: Buffer = cloned.__toBuffer();
+        return this.assembleHeader(jobTemplate, versionMask, nonce, splicedCoinbase, timestamp);
+    }
+
+    private assembleHeader(
+        jobTemplate: IJobTemplate,
+        versionMask: number,
+        nonce: number,
+        coinbaseSerialized: Buffer,
+        timestamp: number,
+    ): Buffer {
+        const coinbaseHash = bitcoinjs.crypto.hash256(coinbaseSerialized);
         const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, this.merkleBranchBuffers);
 
         let version = jobTemplate.block.version;
