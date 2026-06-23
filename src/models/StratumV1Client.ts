@@ -332,6 +332,23 @@ export class StratumV1Client {
 
                 if (errors.length === 0 && this.stratumInitialized == true) {
                     console.log(`mining.submit <- ${this.extraNonceAndSessionId} mode=${this.isHobbyMinerSession ? 'HOBBY' : 'NORMAL'} job=${miningSubmitMessage.jobId} ntime=${miningSubmitMessage.ntime} nonce=${miningSubmitMessage.nonce} versionMask=${miningSubmitMessage.versionMask}`);
+                    // DIAGNOSTIC: dump raw mining.submit params so we can see
+                    // exactly what the firmware sent in each position. Gated
+                    // on any DIAGNOSTIC_SHARE_LOGGING_MODES being set, so it
+                    // stays silent in production. NerdMiner v1.8.3 is
+                    // suspected to send a hardcoded "00000001" as extranonce2
+                    // even when the pool advertises extranonce2_size = 0; this
+                    // log lets us confirm what arrives on the wire vs. what
+                    // the validator parses into miningSubmitMessage.
+                    const diagModesRaw = this.configService.get<string>('DIAGNOSTIC_SHARE_LOGGING_MODES');
+                    if (diagModesRaw && diagModesRaw.trim().length > 0) {
+                        try {
+                            const rawParams = (parsedMessage as { params?: unknown })?.params;
+                            console.log(`  [diag] raw mining.submit params: ${JSON.stringify(rawParams)}`);
+                        } catch {
+                            // ignore — diagnostic only
+                        }
+                    }
                     const result = await this.handleMiningSubmission(miningSubmitMessage);
                     if (result == true) {
                         const success = await this.write(JSON.stringify(miningSubmitMessage.response()) + '\n');
@@ -653,6 +670,18 @@ export class StratumV1Client {
             if (enabledModes.has('suffix-en1-en2')) {
                 probe('suffix-en1-en2', () => job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, Buffer.concat([en1, en2]), timestamp));
             }
+            if (enabledModes.has('suffix-en1-default-en2')) {
+                // NerdMiner v1.8.3 hardcodes mWorker.extranonce2 = "00000001"
+                // whenever the pool-advertised extranonce2_size is not 2, 4 or 8
+                // (the size=0 case falls into the `else` branch in
+                // utils.cpp:222-226). The firmware then hashes:
+                //   coinbase = coinb1 || extranonce1 || "00000001" || coinb2
+                // regardless of what the pool said. This hypothesis tests that.
+                const en2default = Buffer.from('00000001', 'hex');
+                probe('suffix-en1-default-en2', () =>
+                    job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, Buffer.concat([en1, en2default]), timestamp),
+                );
+            }
             if (enabledModes.has('suffix-zero4')) {
                 probe('suffix-zero4', () => job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, zero4, timestamp));
             }
@@ -834,6 +863,7 @@ export class StratumV1Client {
             'canonical',
             'suffix-en1',
             'suffix-en1-en2',
+            'suffix-en1-default-en2',
             'suffix-zero4',
             'suffix-zero8',
             'prefix-en1',
