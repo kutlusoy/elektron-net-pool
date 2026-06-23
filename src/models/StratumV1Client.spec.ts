@@ -214,11 +214,14 @@ describe('StratumV1Client', () => {
 
         await new Promise((r) => setTimeout(r, 1));
 
-        // miner.py-style: extranonce2_size = 0 — worker iterates nothing and
-        // cannot splice into scriptSig. The session id is reused as both the
-        // mining.notify channel tag and the wire-level extranonce1 so hobby
-        // firmwares (NerdMiner, Bitaxe) accept the subscribe reply.
-        expect(socket.write).toHaveBeenCalledWith(`{"id":1,"error":null,"result":[[["mining.notify","${client.extraNonceAndSessionId}"]],"${client.extraNonceAndSessionId}",0]}\n`, expect.any(Function));
+        // NORMAL mode default: bitaxe v2.2 is a Stratum-compliant firmware
+        // (ESP-Miner), so the subscribe reply uses extranonce1 = "" and
+        // extranonce2_size = 0. Coinbase reconstruction on the miner side
+        // then degenerates to coinb1 (= canonical), matching the pool's
+        // submit path byte for byte (miner.py reference). HOBBY mode (for
+        // NerdMiner) sends the session id as extranonce1 instead; that path
+        // is covered in SubscriptionMessage.spec.ts.
+        expect(socket.write).toHaveBeenCalledWith(`{"id":1,"error":null,"result":[[["mining.notify","${client.extraNonceAndSessionId}"]],"",0]}\n`, expect.any(Function));
 
     });
 

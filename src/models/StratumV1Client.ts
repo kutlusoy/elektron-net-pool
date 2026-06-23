@@ -166,12 +166,19 @@ export class StratumV1Client {
                         this.sessionStart = new Date();
                         this.statistics = new StratumV1ClientStatistics(this.clientStatisticsService);
                         this.extraNonceAndSessionId = this.getRandomHexString();
-                        const mode = this.isHobbyMiner(subscriptionMessage.userAgent) ? 'HOBBY' : 'NORMAL';
+                        this.isHobbyMinerSession = this.isHobbyMiner(subscriptionMessage.userAgent);
+                        const mode = this.isHobbyMinerSession ? 'HOBBY' : 'NORMAL';
                         console.log(`New client ID: ${this.extraNonceAndSessionId}, userAgent=${subscriptionMessage.userAgent}, mode=${mode}, ${this.socket.remoteAddress}:${this.socket.remotePort}`);
                     }
 
                     this.clientSubscription = subscriptionMessage;
-                    const success = await this.write(JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId)) + '\n');
+                    // Per-session subscribe response:
+                    //   HOBBY  (NerdMiner family): non-empty extranonce1 to keep
+                    //                              the firmware from aborting.
+                    //   NORMAL (Bitaxe ESP-Miner, modern ASICs): empty extranonce1
+                    //                              for byte-exact miner.py parity
+                    //                              and clean share validation.
+                    const success = await this.write(JSON.stringify(this.clientSubscription.response(this.extraNonceAndSessionId, this.isHobbyMinerSession)) + '\n');
                     if (!success) {
                         return;
                     }
@@ -401,15 +408,15 @@ export class StratumV1Client {
             return;
         }
 
-        if (this.isHobbyMiner(this.clientSubscription.userAgent)) {
-            // ESP32-class hobby miners (NerdMiner, Bitaxe, NerdAxe, ...) run
-            // at a few tens of kH/s. A single share at diff=1 would take
-            // hours; drop the starting difficulty so shares actually arrive
-            // within the pool's dead-client timeout window. Configurable via
-            // HOBBY_MINER_DIFFICULTY env var.
+        if (this.isHobbyMinerSession) {
+            // ESP32-class hobby miners running NerdMiner_v2-style firmware are
+            // on the order of tens of kH/s. A single share at diff=1 would
+            // take hours; drop the starting difficulty so shares actually
+            // arrive within the pool's dead-client timeout window. Configurable
+            // via HOBBY_MINER_DIFFICULTY env var. The HOBBY flag itself was
+            // assigned at subscribe time from isHobbyMiner(userAgent).
             const configured = Number(this.configService.get<string>('HOBBY_MINER_DIFFICULTY'));
             this.sessionDifficulty = Number.isFinite(configured) && configured > 0 ? configured : 0.001;
-            this.isHobbyMinerSession = true;
         } else if (this.clientSubscription.userAgent === 'cpuminer') {
             this.sessionDifficulty = 0.1;
         }
