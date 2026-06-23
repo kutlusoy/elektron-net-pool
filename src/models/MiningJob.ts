@@ -154,6 +154,43 @@ export class MiningJob {
         return header;
     }
 
+    /**
+     * Diagnostic only. Recomputes the 80-byte header as a Stratum-classic
+     * worker would, i.e. with `coinbaseSuffix` (typically extranonce1 || extranonce2)
+     * appended to the canonical coinbase before hashing. Used to check whether
+     * firmwares like NerdMiner V2 splice extranonce1 into the coinbase even
+     * when extranonce2_size = 0 — if shares validate at this header but not at
+     * `buildHeaderBuffer`, the firmware is doing the classic splice.
+     */
+    public buildHeaderBufferWithCoinbaseSuffix(
+        jobTemplate: IJobTemplate,
+        versionMask: number,
+        nonce: number,
+        coinbaseSuffix: Buffer,
+        timestamp: number,
+    ): Buffer {
+        const splicedCoinbase = coinbaseSuffix.length > 0
+            ? Buffer.concat([this.coinbasePart1Buffer, coinbaseSuffix])
+            : this.coinbasePart1Buffer;
+        const coinbaseHash = bitcoinjs.crypto.hash256(splicedCoinbase);
+        const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, this.merkleBranchBuffers);
+
+        let version = jobTemplate.block.version;
+        if (versionMask !== undefined && versionMask != 0) {
+            version = version ^ versionMask;
+        }
+
+        const header = Buffer.alloc(80);
+        header.writeInt32LE(version, 0);
+        jobTemplate.block.prevHash.copy(header, 4);
+        merkleRoot.copy(header, 36);
+        header.writeUInt32LE(timestamp, 68);
+        header.writeUInt32LE(jobTemplate.block.bits, 72);
+        header.writeUInt32LE(nonce, 76);
+
+        return header;
+    }
+
     public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);
