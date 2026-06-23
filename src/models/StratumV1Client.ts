@@ -593,51 +593,83 @@ export class StratumV1Client {
         );
         const { submissionDifficulty } = this.calculateDifficulty(header);
 
-        // DIAGNOSTIC (gated behind DIAGNOSTIC_SHARE_LOGGING env var):
-        // Some hobby firmwares (NerdMiner V2 < 1.8.3 et al.) splice the
-        // wire-level extranonce1 (and any extranonce2) into the coinbase
-        // before computing the merkle root, even when we advertise
-        // extranonce2_size = 0. The pool's canonical coinbase has no such
-        // splice, so the miner's header hashes against a different merkle
-        // root than ours and every share reads as diff~0. Compute the
-        // alternate difficulty under the splice hypothesis and log it so
-        // we can see whether the spliced header would have validated. If
-        // altSpliced is consistently >= required while canonical is ~0,
-        // the firmware is doing the classic splice and the pool cannot
-        // validate its shares without breaking UTXO attestation.
-        // Set DIAGNOSTIC_SHARE_LOGGING=true to enable (very chatty — one
-        // extra log line per share).
-        const diagnosticLoggingEnabled = String(this.configService.get<string>('DIAGNOSTIC_SHARE_LOGGING') ?? '').toLowerCase() === 'true';
-        if (diagnosticLoggingEnabled) {
-            let altDiff = 0;
-            let altCanonical = 0;
-            try {
-                const en1 = (this.extraNonceAndSessionId && this.extraNonceAndSessionId.length > 0)
-                    ? Buffer.from(this.extraNonceAndSessionId, 'hex')
-                    : Buffer.alloc(0);
-                const en2 = (submission.extraNonce2 && submission.extraNonce2.length > 0)
-                    ? Buffer.from(submission.extraNonce2, 'hex')
-                    : Buffer.alloc(0);
-                const splicedSuffix = Buffer.concat([en1, en2]);
-                const altHeader = job.buildHeaderBufferWithCoinbaseSuffix(
-                    jobTemplate, versionMask, nonce, splicedSuffix, timestamp,
-                );
-                altDiff = this.calculateDifficulty(altHeader).submissionDifficulty;
-                // Also probe the "miner used empty extranonces" case as a
-                // sanity baseline — should equal `submissionDifficulty` exactly.
-                const baselineHeader = job.buildHeaderBufferWithCoinbaseSuffix(
-                    jobTemplate, versionMask, nonce, Buffer.alloc(0), timestamp,
-                );
-                altCanonical = this.calculateDifficulty(baselineHeader).submissionDifficulty;
-            } catch (e) {
-                console.log(`  [diag] error computing alt diff: ${(e as Error)?.message}`);
+        // DIAGNOSTIC (gated behind DIAGNOSTIC_SHARE_LOGGING_MODES env var):
+        // Some hobby firmwares (NerdMiner V2, older Bitaxe builds, etc.)
+        // mangle the coinbase in non-spec ways before computing the merkle
+        // root. The pool's canonical coinbase is byte-exact to miner.py
+        // (required for UTXO attestation), so when a firmware's merkle root
+        // diverges, every share reads as diff~0 against the pool's view.
+        //
+        // Each enabled mode reconstructs the header under one specific
+        // hypothesis about what the firmware splices into the coinbase, and
+        // we log the resulting difficulty side by side. If exactly one
+        // hypothesis consistently produces diff >= required while canonical
+        // stays ~0, we've identified the firmware's mangling — and can then
+        // decide whether it's pool-fixable or needs a firmware patch.
+        //
+        // Env value is a comma-separated list of mode codes. Empty or unset
+        // disables all diagnostic output. Special value `all` enables every
+        // mode. Available modes:
+        //
+        //   canonical            no splice (== the value used for share OK check)
+        //   suffix-en1           canonical || extranonce1
+        //   suffix-en1-en2       canonical || extranonce1 || extranonce2  (classic Stratum)
+        //   suffix-zero4         canonical || 0x00000000                  (hardcoded extranonce)
+        //   suffix-zero8         canonical || 0x0000000000000000
+        //   prefix-en1           extranonce1 || canonical                 (splice at start)
+        //   suffix-en1-reversed  canonical || byte-reversed extranonce1   (endianness bug)
+        //   scriptsig-en1        extranonce1 spliced inside vin[0].scriptSig (spec-compliant splice)
+        const enabledModes = this.parseDiagnosticModes(
+            this.configService.get<string>('DIAGNOSTIC_SHARE_LOGGING_MODES'),
+        );
+        if (enabledModes.size > 0) {
+            const en1 = (this.extraNonceAndSessionId && this.extraNonceAndSessionId.length > 0)
+                ? Buffer.from(this.extraNonceAndSessionId, 'hex')
+                : Buffer.alloc(0);
+            const en2 = (submission.extraNonce2 && submission.extraNonce2.length > 0)
+                ? Buffer.from(submission.extraNonce2, 'hex')
+                : Buffer.alloc(0);
+            const en1Reversed = Buffer.from(en1).reverse();
+            const zero4 = Buffer.alloc(4);
+            const zero8 = Buffer.alloc(8);
+
+            const parts: string[] = [];
+            const probe = (label: string, fn: () => Buffer | null) => {
+                try {
+                    const h = fn();
+                    const d = h ? this.calculateDifficulty(h).submissionDifficulty : 0;
+                    parts.push(`${label}=${d.toFixed(8)}`);
+                } catch (e) {
+                    parts.push(`${label}=err:${(e as Error)?.message ?? 'unknown'}`);
+                }
+            };
+
+            if (enabledModes.has('canonical')) {
+                parts.push(`canonical=${submissionDifficulty.toFixed(8)}`);
             }
-            console.log(
-                `  [diag] canonical=${submissionDifficulty.toFixed(8)} ` +
-                `altSpliced=${altDiff.toFixed(8)} ` +
-                `altBaseline=${altCanonical.toFixed(8)} ` +
-                `en1=${this.extraNonceAndSessionId} en2=${submission.extraNonce2 ?? ''}`
-            );
+            if (enabledModes.has('suffix-en1')) {
+                probe('suffix-en1', () => job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, en1, timestamp));
+            }
+            if (enabledModes.has('suffix-en1-en2')) {
+                probe('suffix-en1-en2', () => job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, Buffer.concat([en1, en2]), timestamp));
+            }
+            if (enabledModes.has('suffix-zero4')) {
+                probe('suffix-zero4', () => job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, zero4, timestamp));
+            }
+            if (enabledModes.has('suffix-zero8')) {
+                probe('suffix-zero8', () => job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, zero8, timestamp));
+            }
+            if (enabledModes.has('prefix-en1')) {
+                probe('prefix-en1', () => job.buildHeaderBufferWithCoinbasePrefix(jobTemplate, versionMask, nonce, en1, timestamp));
+            }
+            if (enabledModes.has('suffix-en1-reversed')) {
+                probe('suffix-en1-reversed', () => job.buildHeaderBufferWithCoinbaseSuffix(jobTemplate, versionMask, nonce, en1Reversed, timestamp));
+            }
+            if (enabledModes.has('scriptsig-en1')) {
+                probe('scriptsig-en1', () => job.buildHeaderBufferWithScriptSigSplice(jobTemplate, versionMask, nonce, en1, timestamp));
+            }
+
+            console.log(`  [diag] ${parts.join(' ')} en1=${this.extraNonceAndSessionId} en2=${submission.extraNonce2 ?? ''}`);
         }
 
         console.log(`share diff=${submissionDifficulty.toFixed(6)} required=${this.sessionDifficulty} ${submissionDifficulty >= this.sessionDifficulty ? 'OK' : 'LOW'} from ${this.extraNonceAndSessionId}`);
@@ -789,6 +821,30 @@ export class StratumV1Client {
         }
 
         return number;
+    }
+
+    private parseDiagnosticModes(raw: string | undefined): Set<string> {
+        // DIAGNOSTIC_SHARE_LOGGING_MODES env values:
+        //   ""         -> {} (logging off)
+        //   "all"      -> every supported mode
+        //   "a,b,c"    -> the named modes (whitespace and case insensitive)
+        // Unknown tokens are silently dropped — the StartOS multiselect is
+        // the source of truth for valid mode names.
+        const ALL_MODES = [
+            'canonical',
+            'suffix-en1',
+            'suffix-en1-en2',
+            'suffix-zero4',
+            'suffix-zero8',
+            'prefix-en1',
+            'suffix-en1-reversed',
+            'scriptsig-en1',
+        ];
+        if (!raw) return new Set();
+        const tokens = raw.split(',').map(t => t.trim().toLowerCase()).filter(t => t.length > 0);
+        if (tokens.length === 0) return new Set();
+        if (tokens.includes('all')) return new Set(ALL_MODES);
+        return new Set(tokens.filter(t => ALL_MODES.includes(t)));
     }
 
     private isHobbyMiner(userAgent: string): boolean {
