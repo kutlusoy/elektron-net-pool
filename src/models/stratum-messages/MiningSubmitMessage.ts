@@ -30,6 +30,11 @@ export class MiningSubmitMessage extends StratumBaseMessage {
     @IsString()
     @Length(EXTRANONCE2_SIZE_BYTES * 2, EXTRANONCE2_SIZE_BYTES * 2)
     @Transform(({ value, key, obj, type }) => {
+        // miner.py builds no extranonce2; with EXTRANONCE2_SIZE_BYTES = 0
+        // the field exists positionally but contributes 0 bytes. Some
+        // firmwares still send a leftover placeholder — normalise to ""
+        // so the @Length(0,0) validator accepts it.
+        if (EXTRANONCE2_SIZE_BYTES === 0) return '';
         return obj.params[2];
     })
     public extraNonce2: string;

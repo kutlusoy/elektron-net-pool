@@ -25,10 +25,11 @@ export class SubscriptionMessage extends StratumBaseMessage {
     }
 
     public response(clientId: string) {
-        // Standard Stratum v1 subscribe response: `clientId` is the per-
-        // connection extranonce1 (also the mining.notify channel tag), and
-        // `extranonce2_size` tells the worker how many bytes it generates
-        // and iterates inside the coinbase scriptSig.
+        // miner.py-equivalent Stratum wiring: extranonce sizes are 0 so the
+        // worker has nothing to splice into the coinbase. `clientId` is the
+        // mining.notify channel tag — kept stable across `mining.set_difficulty`
+        // updates — but it is NOT used as extranonce1 (which would otherwise be
+        // inserted into scriptSig and break the UTXO attestation).
         return {
             id: this.id,
             error: null,
@@ -36,7 +37,7 @@ export class SubscriptionMessage extends StratumBaseMessage {
                 [
                     ['mining.notify', clientId]
                 ],
-                clientId,
+                '',
                 EXTRANONCE2_SIZE_BYTES
             ]
         }

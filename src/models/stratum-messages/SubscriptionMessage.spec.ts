@@ -26,7 +26,7 @@ describe('SubscriptionMessage', () => {
         expect(message.userAgent).toBe('unknown');
     });
 
-    it('should respond with session-id extranonce1 and standard extranonce2_size', () => {
+    it('should respond with empty extranonce1 and zero extranonce2_size (miner.py compatible)', () => {
         const message = plainToInstance(
             SubscriptionMessage,
             JSON.parse('{"id":1,"method":"mining.subscribe","params":["bitaxe v2.2"]}')
@@ -37,8 +37,8 @@ describe('SubscriptionMessage', () => {
             error: null,
             result: [
                 [['mining.notify', '57a6f098']],
-                '57a6f098',
-                4
+                '',
+                0
             ]
         });
     });
