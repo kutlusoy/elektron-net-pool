@@ -65,6 +65,19 @@ $ npm run test:cov
 
 See [elektron-net-pool-ui](https://github.com/kutlusoy/elektron-net-pool-ui).
 
+## Supported miners
+
+See [`Miner_Compatibility_List.md`](./Miner_Compatibility_List.md) for the
+full matrix of tested SHA-256d miners (industrial ASICs, hobby ASICs,
+CPU/GPU clients) with per-miner status and the reason behind any
+incompatibility. Short version: anything running stock cgminer-derived
+firmware — Antminer, Whatsminer, Avalon, Canaan, Innosilicon, Bitaxe
+(ESP-Miner), cpuminer, bfgminer, sgminer — works in NORMAL mode out of
+the box. NerdMiner_v2 and its forks (NerdAxe, NerdQAxe) stay connected
+in HOBBY mode but cannot earn rewards: their firmware hardcodes a
+coinbase extranonce splice that Elektron's per-block UTXO attestation
+rejects.
+
 ## Deployment
 
 Install pm2 (https://pm2.keymetrics.io/)
