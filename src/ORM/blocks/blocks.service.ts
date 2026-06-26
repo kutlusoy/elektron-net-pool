@@ -29,6 +29,9 @@ export class BlocksService {
                 minerAddress: true,
                 worker: true,
                 sessionId: true
+            },
+            order: {
+                height: 'DESC'
             }
         });
     }
@@ -43,6 +46,9 @@ export class BlocksService {
             },
             where: {
                 minerAddress: address
+            },
+            order: {
+                height: 'DESC'
             }
         });
     }

@@ -22,9 +22,16 @@ export class ClientController {
 
         const addressSettings = await this.addressSettingsService.getSettings(address, false);
 
+        const accounting = await this.clientStatisticsService.getAccountingForAddress(address);
+
         return {
             bestDifficulty: addressSettings?.bestDifficulty,
             workersCount: workers.length,
+            accounting: {
+                ...accounting,
+                bestSubmissionDifficulty: addressSettings?.bestDifficulty ?? 0,
+                bestSubmissionDifficultyAt: addressSettings?.updatedAt ?? null,
+            },
             workers: await Promise.all(
                 workers.map(async (worker) => {
                     return {
@@ -59,11 +66,17 @@ export class ClientController {
         }, 0);
 
         const chartData = await this.clientStatisticsService.getChartDataForGroup(address, workerName);
+        const accounting = await this.clientStatisticsService.getAccountingForGroup(address, workerName);
+
         return {
 
             name: workerName,
             bestDifficulty: Math.floor(bestDifficulty),
             chartData: chartData,
+            accounting: {
+                ...accounting,
+                bestSubmissionDifficulty: bestDifficulty,
+            },
 
         }
     }
@@ -76,13 +89,18 @@ export class ClientController {
             return new NotFoundException();
         }
         const chartData = await this.clientStatisticsService.getChartDataForSession(worker.address, worker.clientName, worker.sessionId);
+        const accounting = await this.clientStatisticsService.getAccountingForSession(worker.address, worker.clientName, worker.sessionId);
 
         return {
             sessionId: worker.sessionId,
             name: worker.clientName,
             bestDifficulty: Math.floor(worker.bestDifficulty),
             chartData: chartData,
-            startTime: worker.startTime
+            startTime: worker.startTime,
+            accounting: {
+                ...accounting,
+                bestSubmissionDifficulty: worker.bestDifficulty,
+            },
         }
     }
 }
