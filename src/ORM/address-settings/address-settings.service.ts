@@ -50,11 +50,14 @@ export class AddressSettingsService {
     }
 
     public async getHighScores() {
-        return await this.addressSettingsRepository.createQueryBuilder()
-            .select('"updatedAt", "bestDifficulty", "bestDifficultyUserAgent"')
-            .orderBy('"bestDifficulty"', 'DESC')
+        return await this.addressSettingsRepository.createQueryBuilder('settings')
+            .select('settings.updatedAt', 'updatedAt')
+            .addSelect('settings.bestDifficulty', 'bestDifficulty')
+            .addSelect('settings.bestDifficultyUserAgent', 'bestDifficultyUserAgent')
+            .where('settings.bestDifficulty > 0')
+            .orderBy('settings.bestDifficulty', 'DESC')
             .limit(10)
-            .execute();
+            .getRawMany();
     }
 
     public async createNew(address: string) {

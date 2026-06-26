@@ -111,4 +111,45 @@ export class AppController {
 
   }
 
+  @Get('info/accounting')
+  public async infoAccounting() {
+
+    const CACHE_KEY = 'SITE_ACCOUNTING';
+    const cachedResult = await this.cacheManager.get(CACHE_KEY);
+
+    if (cachedResult != null) {
+      return cachedResult;
+    }
+
+    const accounting = await this.clientStatisticsService.getAccountingForPool();
+    const highScores = await this.addressSettingsService.getHighScores();
+
+    const top = highScores?.[0];
+    const bestSubmissionDifficulty = top ? Number(top.bestDifficulty ?? 0) : 0;
+    const bestSubmissionDifficultyAt = top ? top.updatedAt : null;
+
+    let networkDifficultyPercent = 0;
+    try {
+      const miningInfo = await firstValueFrom(this.bitcoinRpcService.newBlock$);
+      const networkDifficulty = Number(miningInfo?.difficulty ?? 0);
+      if (networkDifficulty > 0) {
+        networkDifficultyPercent = (accounting.totalCreditedDifficulty / networkDifficulty) * 100;
+      }
+    } catch (e) {
+      networkDifficultyPercent = 0;
+    }
+
+    const data = {
+      ...accounting,
+      bestSubmissionDifficulty,
+      bestSubmissionDifficultyAt,
+      networkDifficultyPercent,
+    };
+
+    //30s
+    await this.cacheManager.set(CACHE_KEY, data, 30 * 1000);
+
+    return data;
+  }
+
 }

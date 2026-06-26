@@ -254,4 +254,56 @@ export class ClientStatisticsService {
     public async deleteAll() {
         return await this.clientStatisticsRepository.clear()
     }
+
+    public async getAccountingForPool() {
+        return await this.getAccounting('1 = 1', []);
+    }
+
+    public async getAccountingForAddress(address: string) {
+        return await this.getAccounting('address = ?', [address]);
+    }
+
+    public async getAccountingForGroup(address: string, clientName: string) {
+        return await this.getAccounting('address = ? AND clientName = ?', [address, clientName]);
+    }
+
+    public async getAccountingForSession(address: string, clientName: string, sessionId: string) {
+        return await this.getAccounting(
+            'address = ? AND clientName = ? AND sessionId = ?',
+            [address, clientName, sessionId]
+        );
+    }
+
+    private async getAccounting(whereClause: string, params: any[]) {
+        const tenMinutesAgo = Date.now() - (10 * 60 * 1000);
+        const oneHourAgo = Date.now() - (60 * 60 * 1000);
+
+        const query = `
+            SELECT
+                COALESCE(SUM(shares), 0) AS totalCreditedDifficulty,
+                COALESCE(SUM(acceptedCount), 0) AS totalAcceptedShares,
+                COALESCE(SUM(CASE WHEN time >= ${oneHourAgo} THEN shares ELSE 0 END), 0) AS creditedDifficultyLastHour,
+                COALESCE(SUM(CASE WHEN time >= ${tenMinutesAgo} THEN shares ELSE 0 END), 0) AS sharesLast10Minutes,
+                COALESCE(SUM(CASE WHEN time >= ${tenMinutesAgo} THEN acceptedCount ELSE 0 END), 0) AS acceptedSharesLast10Minutes
+            FROM
+                client_statistics_entity
+            WHERE
+                ${whereClause}
+        `;
+
+        const result = await this.clientStatisticsRepository.query(query, params);
+        const row = result?.[0] ?? {};
+
+        const sharesLast10Minutes = Number(row.sharesLast10Minutes ?? 0);
+        const creditedDifficultyLastHour = Number(row.creditedDifficultyLastHour ?? 0);
+
+        return {
+            totalCreditedDifficulty: Number(row.totalCreditedDifficulty ?? 0),
+            totalAcceptedShares: Number(row.totalAcceptedShares ?? 0),
+            creditedDifficultyLastHour,
+            acceptedSharesLast10Minutes: Number(row.acceptedSharesLast10Minutes ?? 0),
+            hashRateLast10Minutes: (sharesLast10Minutes * 4294967296) / (10 * 60),
+            hashRateLastHour: (creditedDifficultyLastHour * 4294967296) / (60 * 60),
+        };
+    }
 }

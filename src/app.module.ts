@@ -17,6 +17,7 @@ import { RpcBlocksModule } from './ORM/rpc-block/rpc-block.module';
 import { TelegramSubscriptionsModule } from './ORM/telegram-subscriptions/telegram-subscriptions.module';
 import { AppService } from './services/app.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
+import { LogRotationService } from './services/log-rotation.service';
 import { BraiinsService } from './services/braiins.service';
 import { BTCPayService } from './services/btc-pay.service';
 import { DiscordService } from './services/discord.service';
@@ -74,6 +75,7 @@ const ORMModules = [
         BTCPayService,
         BraiinsService,
         ExternalSharesService,
+        LogRotationService,
     ],
 })
 export class AppModule {
