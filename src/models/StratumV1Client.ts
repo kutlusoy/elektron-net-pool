@@ -338,7 +338,6 @@ export class StratumV1Client {
                 const errors = await validate(miningSubmitMessage, validatorOptions);
 
                 if (errors.length === 0 && this.stratumInitialized == true) {
-                    console.log(`mining.submit <- ${this.extraNonceAndSessionId} mode=${this.isHobbyMinerSession ? 'HOBBY' : 'NORMAL'} job=${miningSubmitMessage.jobId} ntime=${miningSubmitMessage.ntime} nonce=${miningSubmitMessage.nonce} versionMask=${miningSubmitMessage.versionMask}`);
                     // DIAGNOSTIC: dump raw mining.submit params so we can see
                     // exactly what the firmware sent in each position. Gated
                     // on any DIAGNOSTIC_SHARE_LOGGING_MODES being set, so it
@@ -530,7 +529,6 @@ export class StratumV1Client {
         if (!success) {
             return;
         }
-        console.log(`mining.notify -> ${this.extraNonceAndSessionId} job=${job.jobId} height=${jobTemplate.blockData.height} diff=${this.sessionDifficulty} clearJobs=${jobTemplate.blockData.clearJobs}`);
         this.lastSentMiningJobTimestamp = jobTemplate.block.timestamp;
 
 
@@ -717,9 +715,6 @@ export class StratumV1Client {
 
             console.log(`  [diag] ${parts.join(' ')} en1=${this.extraNonceAndSessionId} en2=${submission.extraNonce2 ?? ''}`);
         }
-
-        console.log(`share diff=${submissionDifficulty.toFixed(6)} required=${this.sessionDifficulty} ${submissionDifficulty >= this.sessionDifficulty ? 'OK' : 'LOW'} from ${this.extraNonceAndSessionId}`);
-
 
         if (submissionDifficulty >= this.sessionDifficulty) {
             const success = await this.write(JSON.stringify(submission.response()) + '\n');
