@@ -108,10 +108,8 @@ export class BitcoinRpcService implements OnModuleInit {
 
             const block = await this.rpcBlockService.getBlock(blockHeight);
             if (block != null && block.data != null) {
-                console.log(`promise loop resolved, block height ${blockHeight}`);
                 return Promise.resolve(JSON.parse(block.data));
             }
-            console.log(`promise loop, block height ${blockHeight}`);
         }
     }
 
@@ -132,7 +130,6 @@ export class BitcoinRpcService implements OnModuleInit {
             console.error('Error getblocktemplate:', e.message);
             throw new Error('Error getblocktemplate');
         }
-        console.log(`getblocktemplate tx count: ${result.transactions.length} (addr=${coinbaseAddress})`);
         return result;
     }
 
