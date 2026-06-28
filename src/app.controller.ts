@@ -146,8 +146,10 @@ export class AppController {
       networkDifficultyPercent,
     };
 
-    //30s
-    await this.cacheManager.set(CACHE_KEY, data, 30 * 1000);
+    // 10s — short enough that the dashboard's "Best Submitted Share" reflects
+    // newly-OK'd shares quickly without re-hitting the SQLite high-score query
+    // on every viewer refresh.
+    await this.cacheManager.set(CACHE_KEY, data, 10 * 1000);
 
     return data;
   }

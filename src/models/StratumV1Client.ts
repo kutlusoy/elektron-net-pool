@@ -443,10 +443,20 @@ export class StratumV1Client {
             }
         });
 
+        // Tunable cadences for vardiff re-evaluation and template refresh.
+        // High-end ASICs (Bitaxe Gamma, Antminer, Whatsminer) benefit from a
+        // shorter template refresh because they exhaust the (nonce, version)
+        // search space inside a single ntime window — a faster tick keeps the
+        // ntime advancing so they don't waste hashes on stale headers. Both
+        // values are env-overridable and clamped to sane minimums so a typo
+        // can't drop the pool into a tight spin loop.
+        const difficultyCheckMs = this.getTunedIntervalMs('DIFFICULTY_CHECK_INTERVAL_MS', 60 * 1000, 5 * 1000);
+        const jobRefreshMs = this.getTunedIntervalMs('JOB_REFRESH_INTERVAL_MS', 30 * 1000, 1 * 1000);
+
         this.backgroundWork.push(
             setInterval(async () => {
                 await this.checkDifficulty();
-            }, 60 * 1000)
+            }, difficultyCheckMs)
         );
 
         this.backgroundWork.push(
@@ -456,7 +466,7 @@ export class StratumV1Client {
                 } catch (e) {
                     console.error(`Periodic template refresh failed for ${this.clientAuthorization?.address}: ${e?.message ?? e}`);
                 }
-            }, 30 * 1000)
+            }, jobRefreshMs)
         );
 
     }
@@ -763,9 +773,20 @@ export class StratumV1Client {
             }
 
             if (submissionDifficulty > this.entity.bestDifficulty) {
-                await this.clientService.updateBestDifficultyIfHigher(this.extraNonceAndSessionId, submissionDifficulty);
-                this.entity.bestDifficulty = submissionDifficulty;
-                await this.addressSettingsService.updateBestDifficultyIfHigher(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);
+                // Persist best-share updates in their own try/catch so a transient
+                // SQLite busy / write conflict never silently leaves the address
+                // dashboard stuck on 0. Both writes are idempotent and ordered:
+                // the per-session row first, then the per-address aggregate that
+                // drives the "Best Submitted Share" widget and the high-score
+                // table on the splash page.
+                try {
+                    await this.clientService.updateBestDifficultyIfHigher(this.extraNonceAndSessionId, submissionDifficulty);
+                    this.entity.bestDifficulty = submissionDifficulty;
+                    await this.addressSettingsService.updateBestDifficultyIfHigher(this.clientAuthorization.address, submissionDifficulty, this.entity.userAgent);
+                    console.log(`new best share ${submissionDifficulty.toFixed(2)} for ${this.clientAuthorization.address} (${this.extraNonceAndSessionId})`);
+                } catch (e) {
+                    console.error(`Failed to persist best share for ${this.clientAuthorization.address} (${this.extraNonceAndSessionId}): ${e?.message ?? e}`);
+                }
             }
 
 
@@ -857,6 +878,18 @@ export class StratumV1Client {
         }
 
         return number;
+    }
+
+    private getTunedIntervalMs(envKey: string, defaultMs: number, minMs: number): number {
+        const raw = this.configService.get<string>(envKey);
+        if (raw == null || String(raw).trim() === '') {
+            return defaultMs;
+        }
+        const parsed = parseInt(String(raw), 10);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+            return defaultMs;
+        }
+        return Math.max(parsed, minMs);
     }
 
     private parseDiagnosticModes(raw: string | undefined): Set<string> {
