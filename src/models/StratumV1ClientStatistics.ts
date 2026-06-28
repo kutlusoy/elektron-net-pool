@@ -31,7 +31,18 @@ export class StratumV1ClientStatistics {
 
     // We don't want to save them here because it can be DB intensive, instead do it every once in
     // awhile with saveShares()
-    public async addShares(client: ClientEntity, targetDifficulty: number) {
+    //
+    // submissionDifficulty is the share's ACTUAL hash-difficulty (computed from the
+    // submitted header), not the session's required difficulty. Crediting the real
+    // value makes hashrate accounting honest for ASIC firmwares that hardware-filter
+    // above the pool's session diff (e.g. Bitaxe Gamma submits ~1 share/30s at diff
+    // ~6000 even when session diff = 128). The hashrate formula
+    // `shares * 2^32 / time` only matches reality when `shares` is the sum of
+    // ACTUAL share difficulties — using session diff under-credits by a factor of
+    // (firmware_filter / session_diff). The vardiff cache below is fed the same
+    // value so the suggested-difficulty target converges to (hashrate / 2^32 * 10)
+    // regardless of firmware filtering instead of collapsing toward the minimum.
+    public async addShares(client: ClientEntity, submissionDifficulty: number) {
 
         // 10 min
         var coeff = 1000 * 60 * 10;
@@ -43,7 +54,7 @@ export class StratumV1ClientStatistics {
         }
         this.submissionCache.push({
             time: date,
-            difficulty: targetDifficulty,
+            difficulty: submissionDifficulty,
         });
 
 
@@ -52,7 +63,7 @@ export class StratumV1ClientStatistics {
 			this.previousTimeSlotTime = new Date();
             this.currentTimeSlotTime = new Date();
             this.currentTimeSlot = timeSlot;
-            this.shares += targetDifficulty;
+            this.shares += submissionDifficulty;
             this.acceptedCount++;
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
@@ -79,7 +90,7 @@ export class StratumV1ClientStatistics {
             this.currentTimeSlotTime = new Date();
             // Set the new time slot and add incoming shares then insert it
             this.currentTimeSlot = timeSlot;
-            this.shares = targetDifficulty;
+            this.shares = submissionDifficulty;
             this.acceptedCount = 1
             await this.clientStatisticsService.insert({
                 time: this.currentTimeSlot,
@@ -92,7 +103,7 @@ export class StratumV1ClientStatistics {
             this.lastSave = new Date().getTime();
         } else if ((date.getTime() - 60 * 1000) > this.lastSave) {
             // If we haven't saved for a minute, update the table
-            this.shares += targetDifficulty;
+            this.shares += submissionDifficulty;
             this.acceptedCount++;
             await this.clientStatisticsService.update({
                 time: this.currentTimeSlot,
@@ -106,7 +117,7 @@ export class StratumV1ClientStatistics {
         } else {
             // Accept the shares if none of the prior conditions are met,
             // saving to memory for storing later
-            this.shares += targetDifficulty;
+            this.shares += submissionDifficulty;
             this.acceptedCount++;
 			if(this.shares > 0) {
             const time = new Date().getTime() - this.previousTimeSlotTime.getTime();

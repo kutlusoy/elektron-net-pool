@@ -760,7 +760,12 @@ export class StratumV1Client {
             }
             await this.ensureClientEntity();
             try {
-                await this.statistics.addShares(this.entity, this.sessionDifficulty);
+                // Credit the share's ACTUAL hash difficulty (not the session-required
+                // diff) so hashrate and accumulated-work counters stay honest for
+                // miners whose firmware hardware-filters above the pool's session
+                // diff. See StratumV1ClientStatistics.addShares for the full
+                // rationale.
+                await this.statistics.addShares(this.entity, submissionDifficulty);
                 const now = new Date();
                 // only update every minute
                 if (this.entity.updatedAt == null || now.getTime() - this.entity.updatedAt.getTime() > 1000 * 60) {
