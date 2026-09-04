@@ -57,6 +57,13 @@ export class MiningJob {
     private coinbasePart1Buffer: Buffer;
     private coinbasePart2Buffer: Buffer;
     private merkleBranchBuffers: Buffer[];
+    // Frozen at construction from the (possibly pool-rotated, see
+    // StratumV1Client.sendNewMiningJob) jobTemplate.block.version this exact
+    // job was advertised with. Share validation and block submission must use
+    // this, never a freshly re-fetched jobTemplate.block.version, since a
+    // later GBT refresh or local work rotation can change that value for the
+    // pool's current template while this job's own header stays fixed.
+    private jobVersion: number;
 
     public jobTemplateId: string;
     public networkDifficulty: number;
@@ -71,6 +78,7 @@ export class MiningJob {
     ) {
 
         this.creation = new Date().getTime();
+        this.jobVersion = jobTemplate.block.version;
         this.jobTemplateId = jobTemplate.blockData.id;
         this.merkleBranchBuffers = jobTemplate.merkle_branch.map(branch => Buffer.from(branch, 'hex'));
 
@@ -135,15 +143,25 @@ export class MiningJob {
 
         // Stratum wire layout when EXTRANONCE_SIZE = 0 on both sides:
         //
-        //   coinbase = coinb1 + "" + "" + ""
+        //   coinbase = coinb1 + "" + "" + coinb2
         //
-        // i.e. coinb1 = the canonical non-witness coinbase, coinb2 = empty.
-        // This is bit-identical to miner.py's `tx_no_witness` output.
+        // coinb1 ends immediately after scriptSig (version, input count,
+        // prevout, scriptSig length byte, scriptSig itself); coinb2 carries
+        // nSequence, the output count, every output (including the pool
+        // identity outputs appended above, if any) and nLockTime. This is
+        // the split standard Stratum V1 clients (including ESP-Miner) expect
+        // - they read nSequence/outputs/nLockTime from coinb2 unconditionally
+        // and fail to parse the job if coinb2 is empty. With
+        // EXTRANONCE1_SIZE_BYTES = EXTRANONCE2_SIZE_BYTES = 0 nothing is
+        // spliced between coinb1 and coinb2, so coinb1 + coinb2 reassembles
+        // to exactly the same bytes as miner.py's `tx_no_witness` output.
         //@ts-ignore - __toBuffer() skips the witness section.
-        this.coinbasePart1 = this.coinbaseTransaction.__toBuffer().toString('hex');
-        this.coinbasePart2 = '';
-        this.coinbasePart1Buffer = Buffer.from(this.coinbasePart1, 'hex');
-        this.coinbasePart2Buffer = Buffer.alloc(0);
+        const fullCoinbaseBuffer: Buffer = this.coinbaseTransaction.__toBuffer();
+        const coinbaseSplitOffset = 41 + 1 + scriptSig.length; // version(4)+incount(1)+prevout(36)+scriptSigLenByte(1)+scriptSig
+        this.coinbasePart1 = fullCoinbaseBuffer.subarray(0, coinbaseSplitOffset).toString('hex');
+        this.coinbasePart2 = fullCoinbaseBuffer.subarray(coinbaseSplitOffset).toString('hex');
+        this.coinbasePart1Buffer = fullCoinbaseBuffer.subarray(0, coinbaseSplitOffset);
+        this.coinbasePart2Buffer = fullCoinbaseBuffer.subarray(coinbaseSplitOffset);
     }
 
     public cloneCoinbaseTransaction(): bitcoinjs.Transaction {
@@ -152,11 +170,18 @@ export class MiningJob {
 
     public buildHeaderBuffer(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): Buffer {
         // With EXTRANONCE_SIZE = 0 the worker can't change the coinbase, so the
-        // hash is precisely the precomputed coinbasePart1Buffer (=tx_no_witness).
-        const coinbaseHash = bitcoinjs.crypto.hash256(this.coinbasePart1Buffer);
+        // hash is precisely the reassembled coinbasePart1Buffer + coinbasePart2Buffer
+        // (=tx_no_witness). coinbasePart1Buffer alone is only the pre-scriptSig-end
+        // fragment since the coinb1/coinb2 split moved (see constructor) - hashing
+        // it alone would hash a truncated, invalid coinbase transaction.
+        const coinbaseHash = bitcoinjs.crypto.hash256(Buffer.concat([this.coinbasePart1Buffer, this.coinbasePart2Buffer]));
         const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, this.merkleBranchBuffers);
 
-        let version = jobTemplate.block.version;
+        // Use the version this specific job was advertised with (see
+        // jobVersion field), not jobTemplate.block.version - a later GBT
+        // refresh or local work rotation may have moved the pool's current
+        // template's version on since this job was sent.
+        let version = this.jobVersion;
         if (versionMask !== undefined && versionMask != 0) {
             version = version ^ versionMask;
         }
@@ -245,7 +270,8 @@ export class MiningJob {
         const coinbaseHash = bitcoinjs.crypto.hash256(coinbaseSerialized);
         const merkleRoot = this.calculateMerkleRootHash(coinbaseHash, this.merkleBranchBuffers);
 
-        let version = jobTemplate.block.version;
+        // See buildHeaderBuffer(): use this job's own frozen version.
+        let version = this.jobVersion;
         if (versionMask !== undefined && versionMask != 0) {
             version = version ^ versionMask;
         }
@@ -264,6 +290,9 @@ export class MiningJob {
     public copyAndUpdateBlock(jobTemplate: IJobTemplate, versionMask: number, nonce: number, _extraNonce: string, _extraNonce2: string, timestamp: number): bitcoinjs.Block {
 
         const testBlock = Object.assign(new bitcoinjs.Block(), jobTemplate.block);
+        // This job's own frozen version, not whatever jobTemplate.block.version
+        // currently holds (see jobVersion field / buildHeaderBuffer()).
+        testBlock.version = this.jobVersion;
         testBlock.transactions = jobTemplate.block.transactions.map(tx => {
             return Object.assign(new bitcoinjs.Transaction(), tx);
         });
@@ -398,7 +427,7 @@ export class MiningJob {
                 this.coinbasePart1,
                 this.coinbasePart2,
                 jobTemplate.merkle_branch,
-                jobTemplate.block.version.toString(16),
+                this.jobVersion.toString(16),
                 jobTemplate.block.bits.toString(16),
                 jobTemplate.block.timestamp.toString(16),
                 jobTemplate.blockData.clearJobs
