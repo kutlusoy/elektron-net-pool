@@ -139,7 +139,7 @@ export class StratumV1Client {
 
         this.connectionClosed = true;
 
-        // Cancel timers immediately, before the asynchronous cleanup below —
+        // Cancel timers immediately, before the asynchronous cleanup below -
         // a work-refresh tick must not fire again once destroy() has started.
         const work = this.backgroundWork.splice(0);
         work.forEach(timer => {
@@ -408,7 +408,7 @@ export class StratumV1Client {
                             const rawParams = (parsedMessage as { params?: unknown })?.params;
                             console.log(`  [diag] raw mining.submit params: ${JSON.stringify(rawParams)}`);
                         } catch {
-                            // ignore — diagnostic only
+                            // ignore - diagnostic only
                         }
                     }
                     const result = await this.handleMiningSubmission(miningSubmitMessage);
@@ -501,7 +501,7 @@ export class StratumV1Client {
         // Tunable cadences for vardiff re-evaluation and template refresh.
         // High-end ASICs (Bitaxe Gamma, Antminer, Whatsminer) benefit from a
         // shorter template refresh because they exhaust the (nonce, version)
-        // search space inside a single ntime window — a faster tick keeps the
+        // search space inside a single ntime window - a faster tick keeps the
         // ntime advancing so they don't waste hashes on stale headers. Both
         // values are env-overridable and clamped to sane minimums so a typo
         // can't drop the pool into a tight spin loop.
@@ -509,12 +509,12 @@ export class StratumV1Client {
         const jobRefreshMs = this.getTunedIntervalMs('JOB_REFRESH_INTERVAL_MS', 30 * 1000, 1 * 1000);
         // Cheap, RPC-free work refresh: rotates the pool's reserved BIP320
         // bits (see ELEKTRON_POOL_VERSION_BITS_MASK) on the already-cached
-        // template instead of calling getblocktemplate again. Default 500ms
-        // is deliberately aggressive (a high-hashrate ASIC can exhaust
-        // nonce+time+its own version-rolling bits well inside 30s); raise it
-        // via WORK_REFRESH_INTERVAL_MS for large miner counts, since every
-        // tick still allocates a full MiningJob per connected session.
-        const workRefreshMs = this.getTunedIntervalMs('WORK_REFRESH_INTERVAL_MS', 500, 500);
+        // template instead of calling getblocktemplate again. Default 1000ms
+        // keeps a high-hashrate ASIC from exhausting nonce+time+its own
+        // version-rolling bits well inside 30s without allocating a fresh
+        // MiningJob per connected session too aggressively; raise it further
+        // via WORK_REFRESH_INTERVAL_MS for large miner counts.
+        const workRefreshMs = this.getTunedIntervalMs('WORK_REFRESH_INTERVAL_MS', 1000, 500);
 
         this.backgroundWork.push(
             setInterval(async () => {
@@ -584,7 +584,7 @@ export class StratumV1Client {
 
         const baseTemplate = this.currentJobTemplate;
 
-        // Tied to real time, not lastSentMiningJobTimestamp + 1 — with jobs
+        // Tied to real time, not lastSentMiningJobTimestamp + 1 - with jobs
         // going out every few hundred ms, forcing nTime to increase by at
         // least 1 on every single job would run it ahead of wall-clock time
         // within hours. Uniqueness between jobs in the same second comes
@@ -596,7 +596,7 @@ export class StratumV1Client {
             block: Object.assign(new bitcoinjs.Block(), baseTemplate.block, { timestamp }),
             blockData: {
                 ...baseTemplate.blockData,
-                // Fresh search space, not a new block — do not reset miner
+                // Fresh search space, not a new block - do not reset miner
                 // state (submission-hash dedup) or force a clean_jobs=true.
                 clearJobs: false,
             },
@@ -783,7 +783,7 @@ export class StratumV1Client {
         // hypothesis about what the firmware splices into the coinbase, and
         // we log the resulting difficulty side by side. If exactly one
         // hypothesis consistently produces diff >= required while canonical
-        // stays ~0, we've identified the firmware's mangling — and can then
+        // stays ~0, we've identified the firmware's mangling - and can then
         // decide whether it's pool-fixable or needs a firmware patch.
         //
         // Env value is a comma-separated list of mode codes. Empty or unset
@@ -885,7 +885,7 @@ export class StratumV1Client {
                 // (null RPC response per `submitblock`). Any other value is the
                 // node's rejection reason (e.g. `bad-utxo-attestation`). Only
                 // persist accepted blocks in the Found Blocks table and reset
-                // best-difficulty counters on a real win — otherwise rejected
+                // best-difficulty counters on a real win - otherwise rejected
                 // attempts would pollute the dashboard.
                 if (result === 'SUCCESS!') {
                     await this.blocksService.save({
@@ -1049,7 +1049,7 @@ export class StratumV1Client {
         //   ""         -> {} (logging off)
         //   "all"      -> every supported mode
         //   "a,b,c"    -> the named modes (whitespace and case insensitive)
-        // Unknown tokens are silently dropped — the StartOS multiselect is
+        // Unknown tokens are silently dropped - the StartOS multiselect is
         // the source of truth for valid mode names.
         const ALL_MODES = [
             'canonical',
@@ -1178,7 +1178,7 @@ export class StratumV1Client {
 
         try {
             await new Promise<void>((resolve, reject) => {
-                // Re-check immediately before the actual write — the socket
+                // Re-check immediately before the actual write - the socket
                 // can close between the guard above and this point.
                 if (this.isSocketClosed()) {
                     resolve();
