@@ -1,5 +1,6 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Controller, Get, Inject } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
 
@@ -21,6 +22,7 @@ export class AppController {
     private readonly blocksService: BlocksService,
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
+    private readonly configService: ConfigService,
   ) { }
 
   @Get('info')
@@ -90,6 +92,19 @@ export class AppController {
     return miningInfo;
   }
 
+  // Same values MiningJob.ts embeds on-chain as OP_RETURN pool-identity
+  // outputs (doc-elektron/guideline-pool-identity-op-return.md) - read
+  // directly from config rather than by parsing a coinbase, since the pool
+  // already knows its own configured identity. Purely a display convenience
+  // for elektron-net-pool-ui; not used by MiningJob.ts itself.
+  @Get('pool/identity')
+  public async poolIdentity() {
+    const name = this.configService.get<string>('POOL_IDENTIFIER')?.trim() || null;
+    const url = this.configService.get<string>('POOL_URL')?.trim() || null;
+
+    return { name, url };
+  }
+
   @Get('info/chart')
   public async infoChart() {
 
@@ -146,7 +161,7 @@ export class AppController {
       networkDifficultyPercent,
     };
 
-    // 10s — short enough that the dashboard's "Best Submitted Share" reflects
+    // 10s - short enough that the dashboard's "Best Submitted Share" reflects
     // newly-OK'd shares quickly without re-hitting the SQLite high-score query
     // on every viewer refresh.
     await this.cacheManager.set(CACHE_KEY, data, 10 * 1000);
