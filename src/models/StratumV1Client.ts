@@ -28,6 +28,7 @@ import { SUBSCRIBE_SESSION_ID_BYTES } from './stratum.constants';
 import { SuggestDifficulty } from './stratum-messages/SuggestDifficultyMessage';
 import { StratumV1ClientStatistics } from './StratumV1ClientStatistics';
 import { ExternalSharesService } from '../services/external-shares.service';
+import { PoolRegistryService } from '../services/pool-registry.service';
 import { elektronMainnet, elektronRegtest } from '../utils/elektron-network';
 
 const TRUE_DIFF_ONE = 2.695953529101131e67;
@@ -95,7 +96,8 @@ export class StratumV1Client {
         private readonly blocksService: BlocksService,
         private readonly configService: ConfigService,
         private readonly addressSettingsService: AddressSettingsService,
-        private readonly externalSharesService: ExternalSharesService
+        private readonly externalSharesService: ExternalSharesService,
+        private readonly poolRegistryService: PoolRegistryService
     ) {
 
         this.socket.on('data', (data: Buffer) => {
@@ -898,6 +900,7 @@ export class StratumV1Client {
 
                     await this.notificationService.notifySubscribersBlockFound(this.clientAuthorization.address, jobTemplate.blockData.height, updatedJobBlock, result);
                     await this.addressSettingsService.resetBestDifficultyAndShares();
+                    await this.poolRegistryService.reportBlockFound(updatedJobBlock.getId());
                 }
             }
             await this.ensureClientEntity();
