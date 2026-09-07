@@ -94,11 +94,13 @@ export class AppController {
     return miningInfo;
   }
 
-  // Same values MiningJob.ts embeds on-chain as OP_RETURN pool-identity
-  // outputs (doc-elektron/guideline-pool-identity-op-return.md) - read
-  // directly from config rather than by parsing a coinbase, since the pool
-  // already knows its own configured identity. Purely a display convenience
-  // for elektron-net-pool-ui; not used by MiningJob.ts itself.
+  // Read directly from config, not from a coinbase - these values are never
+  // written on-chain (see doc-elektron/fix-report-pool-identity-utxo-attestation.md
+  // for why an earlier revision that tried this was reverted). Used both as
+  // a display convenience for elektron-net-pool-ui and as the payload this
+  // pool reports to mempool explorer instances (see
+  // doc-elektron/guideline-pool-registry-reporting.md and
+  // PoolRegistryService).
   @Get('pool/identity')
   public async poolIdentity() {
     const name = this.configService.get<string>('POOL_IDENTIFIER')?.trim() || null;
