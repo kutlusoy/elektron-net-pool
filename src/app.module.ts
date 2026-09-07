@@ -28,6 +28,7 @@ import { TelegramService } from './services/telegram.service';
 import { ExternalSharesService } from './services/external-shares.service';
 import { ExternalShareController } from './controllers/external-share/external-share.controller';
 import { ExternalSharesModule } from './ORM/external-shares/external-shares.module';
+import { PoolRegistryService } from './services/pool-registry.service';
 
 const ORMModules = [
     ClientStatisticsModule,
@@ -76,6 +77,7 @@ const ORMModules = [
         BraiinsService,
         ExternalSharesService,
         LogRotationService,
+        PoolRegistryService,
     ],
 })
 export class AppModule {

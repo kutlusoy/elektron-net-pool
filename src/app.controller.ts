@@ -1,5 +1,5 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Controller, Get, Inject } from '@nestjs/common';
+import { Controller, Get, Inject, Query } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cache } from 'cache-manager';
 import { firstValueFrom } from 'rxjs';
@@ -9,6 +9,7 @@ import { BlocksService } from './ORM/blocks/blocks.service';
 import { ClientStatisticsService } from './ORM/client-statistics/client-statistics.service';
 import { ClientService } from './ORM/client/client.service';
 import { BitcoinRpcService } from './services/bitcoin-rpc.service';
+import { PoolRegistryService } from './services/pool-registry.service';
 
 @Controller()
 export class AppController {
@@ -23,6 +24,7 @@ export class AppController {
     private readonly bitcoinRpcService: BitcoinRpcService,
     private readonly addressSettingsService: AddressSettingsService,
     private readonly configService: ConfigService,
+    private readonly poolRegistryService: PoolRegistryService,
   ) { }
 
   @Get('info')
@@ -103,6 +105,20 @@ export class AppController {
     const url = this.configService.get<string>('POOL_URL')?.trim() || null;
 
     return { name, url };
+  }
+
+  // Callback target for elektron-net-mempool's report verification (see
+  // doc-elektron/guideline-pool-registry-reporting.md): confirms whether
+  // this pool itself actually reported the given block hash recently,
+  // rather than trusting a report at face value. No wallet, no signature -
+  // only the operator of this URL can ever answer "yes" honestly.
+  @Get('pool/identity/confirm')
+  public async poolIdentityConfirm(@Query('blockHash') blockHash: string) {
+    const name = this.configService.get<string>('POOL_IDENTIFIER')?.trim() || null;
+    const url = this.configService.get<string>('POOL_URL')?.trim() || null;
+    const confirmed = typeof blockHash === 'string' && blockHash.length > 0 && this.poolRegistryService.wasRecentlyFound(blockHash);
+
+    return { confirmed, name, url };
   }
 
   @Get('info/chart')
